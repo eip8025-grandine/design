@@ -19,7 +19,7 @@ and mark the old one `Superseded`.
 Add `upstream` as a fetch-only remote — the disabled push URL stops a
 stray `git push upstream` from reaching the Grandine repository:
 
-    git remote add upstream https://github.com/grandinetech/grandine.git
+    git remote add upstream git@github.com:grandinetech/grandine.git
     git remote set-url --push upstream DISABLED
 
 Take the SHAs from your checkouts:
