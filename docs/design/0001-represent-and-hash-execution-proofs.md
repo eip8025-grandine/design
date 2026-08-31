@@ -5,6 +5,7 @@ workstream: verification
 eip_repo: frisitano/EIPs
 eip_sha: 4855dbeb9a99702a8c4d948ceceb865fb3289759
 consensus_specs_sha: 7d6bd46a015a7dd316c5df855bd89e57c4aa6700
+ssz_specs_sha: 2f7cbc4f82c143e10f3a3cacab52645a8816ef21
 grandine_upstream_sha: eaf220e60699cd63d4223ad2481e42fd15f67802
 superseded_by:
 ---
@@ -16,7 +17,7 @@ superseded_by:
 EIP-8025 adds the consensus-layer proof types — `ProofType`,
 `PublicInput`, `ExecutionProof`, `ExecutionProofEnvelope`,
 `SignedExecutionProofEnvelope` — defined in
-[`specs/_features/eip8025/beacon-chain.md`](https://github.com/ethereum/consensus-specs/blob/7d6bd46a015a7dd316c5df855bd89e57c4aa6700/specs/_features/eip8025/beacon-chain.md).
+[`specs/_features/eip8025/beacon-chain.md`](https://github.com/frisitano/consensus-specs/blob/7d6bd46a015a7dd316c5df855bd89e57c4aa6700/specs/_features/eip8025/beacon-chain.md).
 This doc covers those types, their SSZ codec and merkleization, and
 the design of the payload-binding root computation.
 
@@ -24,14 +25,14 @@ the design of the payload-binding root computation.
 key, and also the `object_root` that the domain-separated signing root
 is built from. The signing root itself is `SigningData { object_root,
 domain }.hash_tree_root()`, a distinct value this milestone does not
-compute. `ExecutionProof` is neither signed nor gossiped: it is the
-proof-engine input a verifier assembles locally.
+compute. In consensus-specs, `ExecutionProof` is neither signed nor
+gossiped: it is the proof-engine input a verifier assembles locally.
 
 The envelope binds a proof to a payload by `beacon_block_root`; the
 verifier derives `public_input.new_payload_request_root` from the
 stored payload and `state.latest_execution_payload_bid`.
 
-Eight things matter to interoperability:
+Eight things matter to implementation and interoperability:
 
 - **Gossip object shape.** consensus-specs gossips
   `SignedExecutionProofEnvelope`; the EIP still gossips
@@ -59,11 +60,9 @@ Eight things matter to interoperability:
   `SSZNewPayloadRequest` also require `ProgressiveContainer`. The
   pinned Grandine baseline supports neither progressive lists nor
   progressive containers.
-- **No `ssz_static` vectors exist for EIP-8025.** The consensus-spec
-  test generator does not currently include EIP-8025.
-- **Progressive SSZ is only transitively pinned.** consensus-specs
-  pins `eth-ssz-specs==0.0.1.dev2`, but the design metadata does not
-  name an `ssz-specs` revision.
+- **No published `ssz_static` vectors exist for EIP-8025.**
+- **Progressive SSZ is pinned.** `ssz_specs_sha` pins the
+  `v0.0.1.dev2` revision used by consensus-specs.
 
 Where consensus-specs and the EIP disagree, this design follows
 consensus-specs for the CL.
@@ -84,7 +83,7 @@ per-fork ones. EIP-8025 does **not** become a `Phase` variant: it
 changes no consensus validity rule and is opt-in, so it must not enter
 fork scheduling or state-transition dispatch.
 
-**Containers.** All five types are preset-independent:
+**Containers.** The proof types are preset-independent:
 `MAX_PROOF_SIZE` is a protocol constant rather than a preset value,
 and none of the container fields depends on a preset.
 `SignedExecutionProofEnvelope.message` is wrapped in
@@ -114,22 +113,22 @@ bytes.
 
 **Payload binding.** The target is `SSZNewPayloadRequest`, a
 `ProgressiveContainer` containing the Gloas `ExecutionPayload`
-([`specs/gloas/beacon-chain.md`](https://github.com/ethereum/consensus-specs/blob/7d6bd46a015a7dd316c5df855bd89e57c4aa6700/specs/gloas/beacon-chain.md#L939)),
+([`specs/gloas/beacon-chain.md`](https://github.com/frisitano/consensus-specs/blob/7d6bd46a015a7dd316c5df855bd89e57c4aa6700/specs/gloas/beacon-chain.md#L939)),
 `versioned_hashes`, `parent_beacon_block_root`, and the Gloas
 `ExecutionRequests`. Grandine has neither: its Gloas containers reuse
 the Deneb `ExecutionPayload` and the Electra `ExecutionRequests`
 (`types/src/gloas/containers.rs`), and `combined::ExecutionPayload`
 stops at Deneb. Grandine's Gloas `ExecutionPayloadEnvelope` also lacks
 `parent_beacon_block_root`. Payload binding depends on the
-implementation baseline providing the required Gloas types.
-Until those types are available, this milestone can implement the
-proof types and progressive SSZ support but not payload binding.
-Payload binding is preset-independent under Gloas because
-`withdrawals` is progressive and the remaining preset-derived bounds —
-`MAX_BLOB_COMMITMENTS_PER_BLOCK`, `BYTES_PER_LOGS_BLOOM`, and
-`MAX_EXTRA_DATA_BYTES` — are identical across Mainnet and Minimal.
-Compile-time assertions should guard those bounds against future
-divergence.
+implementation baseline providing the required Gloas types. Until
+those types are available, this milestone can implement the proof
+types and progressive SSZ support but not payload binding. Payload
+binding is preset-independent under Gloas because `withdrawals` is
+progressive and the remaining preset-derived bounds —
+`MAX_BLOB_COMMITMENTS_PER_BLOCK`, `BYTES_PER_LOGS_BLOOM`,
+`MAX_EXTRA_DATA_BYTES`, and `MAX_BYTES_PER_TRANSACTION` — are
+identical across Mainnet and Minimal. Compile-time assertions should
+guard those bounds against future divergence.
 
 ## Security and compatibility
 
@@ -160,6 +159,6 @@ in *Context*.
 - Which `DOMAIN_EXECUTION_PROOF` value is correct: `0x0F000000` or
   `0x0D000000`? The latter collides with the pinned Gloas domain
   assignment and needs upstream resolution.
-- Should the design pin an `ssz-specs` revision directly?
-- How are Grandine's SSZ roots to be cross-checked? No `ssz_static`
-  vectors exist for EIP-8025.
+- How are EIP-8025 container roots to be cross-checked? Progressive
+  SSZ primitives can use the pinned `ssz-specs` vectors, but no
+  `ssz_static` vectors exist for EIP-8025.
