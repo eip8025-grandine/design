@@ -6,7 +6,7 @@ eip_repo: frisitano/EIPs
 eip_sha: 4855dbeb9a99702a8c4d948ceceb865fb3289759
 consensus_specs_sha: 7d6bd46a015a7dd316c5df855bd89e57c4aa6700
 ssz_specs_sha: 2f7cbc4f82c143e10f3a3cacab52645a8816ef21
-grandine_upstream_sha: eaf220e60699cd63d4223ad2481e42fd15f67802
+grandine_upstream_sha: 9dc532a7031ce33dc70d42763ad028092d50d393
 superseded_by:
 ---
 
@@ -57,9 +57,7 @@ Eight things matter to implementation and interoperability:
 - **`ProofData` uses `ProgressiveList[Byte]`.** The type itself is
   unbounded, so `MAX_PROOF_SIZE` must be enforced separately by an
   explicit check and the gossip size cap. `PublicInput` and
-  `SSZNewPayloadRequest` also require `ProgressiveContainer`. The
-  pinned Grandine baseline supports neither progressive lists nor
-  progressive containers.
+  `SSZNewPayloadRequest` also require `ProgressiveContainer`.
 - **No published `ssz_static` vectors exist for EIP-8025.**
 - **Progressive SSZ is pinned.** `ssz_specs_sha` pins the
   `v0.0.1.dev2` revision used by consensus-specs.
@@ -94,14 +92,12 @@ cache avoids repeated merkleization of the same message but cannot
 help across distinct messages, which is why the pre-dedup hashing cost
 below still stands.
 
-**Progressive merkleization.** `proof_data` requires
-`ProgressiveList[Byte]` and `PublicInput` requires
-`ProgressiveContainer`, neither of which the pinned Grandine baseline
-supports. Using a bounded `ByteList` for the proof instead would make
-the proof root depend on `MAX_PROOF_SIZE`, which is still provisional.
-Progressive roots are limit-independent, so the implementation needs
-progressive-list and progressive-container support. A general
-`ProgressiveList<T>` is also required for Gloas payload binding.
+**Progressive merkleization.** `proof_data` uses
+`ProgressiveList[Byte]` and `PublicInput` uses a
+`ProgressiveContainer`. Using a bounded `ByteList` for the proof
+instead would make the proof root depend on `MAX_PROOF_SIZE`, which is
+still provisional. Progressive roots are limit-independent, so the
+bound remains separate from merkleization and never reaches the root.
 
 **Decode bound.** Because `ProgressiveList[Byte]` is unbounded at the
 type level, Grandine must enforce proof-size limits explicitly. Gossip
@@ -115,17 +111,9 @@ bytes.
 `ProgressiveContainer` containing the Gloas `ExecutionPayload`
 ([`specs/gloas/beacon-chain.md`](https://github.com/frisitano/consensus-specs/blob/7d6bd46a015a7dd316c5df855bd89e57c4aa6700/specs/gloas/beacon-chain.md#L939)),
 `versioned_hashes`, `parent_beacon_block_root`, and the Gloas
-`ExecutionRequests`. Grandine has neither: its Gloas containers reuse
-the Deneb `ExecutionPayload` and the Electra `ExecutionRequests`
-(`types/src/gloas/containers.rs`), and `combined::ExecutionPayload`
-stops at Deneb. Grandine's Gloas `ExecutionPayloadEnvelope` also lacks
-`parent_beacon_block_root`. Payload binding depends on the
-implementation baseline providing the required Gloas types. Until
-those types are available, this milestone can implement the proof
-types and progressive SSZ support but not payload binding. Payload
-binding is preset-independent under Gloas because `withdrawals` is
-progressive and the remaining preset-derived bounds —
-`MAX_BLOB_COMMITMENTS_PER_BLOCK`, `BYTES_PER_LOGS_BLOOM`,
+`ExecutionRequests`. Payload binding is preset-independent under Gloas
+because `withdrawals` is progressive and the remaining preset-derived
+bounds — `MAX_BLOB_COMMITMENTS_PER_BLOCK`, `BYTES_PER_LOGS_BLOOM`,
 `MAX_EXTRA_DATA_BYTES`, and `MAX_BYTES_PER_TRANSACTION` — are
 identical across Mainnet and Minimal. Compile-time assertions should
 guard those bounds against future divergence.
