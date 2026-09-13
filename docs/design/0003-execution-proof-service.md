@@ -8,7 +8,7 @@ grandine_base: feature/sign-execution-proofs@9af0859
 superseded_by:
 ---
 
-# 0003 — Verifier-only execution-proof service: gossip pipeline and ProofEngine boundary
+# 0003 — Verifier-only execution-proof service: gossip pipeline and ProofVerifier/ProofProver boundary
 
 ## Context
 
@@ -16,9 +16,10 @@ EIP-8025 lets a consensus client validate execution payloads by verifying
 gossiped execution proofs instead of re-executing them. The verifier side
 splits into two components: the **execution-proof service**, the
 consensus-layer orchestrator between gossip and proof verification, and the
-**`ProofEngine`**, the implementation-dependent boundary that delegates
+**proof engine boundary**, the implementation-dependent layer that delegates
 cryptographic verification to an external verifier
-(`proof-engine.md`, "Proof engine").
+(`proof-engine.md`, "Proof engine"). Grandine spells that boundary as two
+traits, `ProofVerifier` + `ProofProver<P>` (Design).
 
 This doc re-baselines the stale week-8 skeleton against two pins:
 
@@ -42,14 +43,22 @@ This doc re-baselines the stale week-8 skeleton against two pins:
 Signing primitives are doc 0002's deliverable; SSZ containers already landed
 on the base branch. This doc fixes shapes and ownership, not bodies.
 
+One shape decision is re-baselined here: the engine boundary is a
+non-generic, object-safe `ProofVerifier` (the thing the task holds and
+erases) plus a generic `ProofProver<P>` (the prover methods, kept as
+reject-stubs), not the single `ProofEngine<P>` trait of the week-8
+skeleton. The split exists because the erased handle cannot carry `P` or a
+`const IS_NULL`; see Design for the dissection.
+
 ## Goals and non-goals
 
 **Goals**
 
-- A new `proof_engine` crate exposing the spec's full 3-method
-  `ProofEngine` trait as an `ExecutionEngine` twin (trait + `&`/`Arc`/`Mutex`
-  forwards + `NullProofEngine` + `MockProofEngine`), prover methods
-  default-rejecting.
+- A new `proof_engine` crate exposing the spec's full 3-method protocol as
+  a non-generic, object-safe `ProofVerifier` (opt-out + verify) plus a
+  generic `ProofProver<P>` (request + get), with `NullProofEngine` and
+  `MockProofEngine`. Prover methods reject. The spec surface stays whole;
+  the split exists so the erased verifier handle carries no `P`.
 - A `ProcessExecutionProofTask` in `fork_choice_control` implementing the
   spec-ordered gossip pipeline verbatim, returning a bid-style
   `MutatorMessage::ExecutionProof` (no `wait_group`).
@@ -78,7 +87,7 @@ eth2_libp2p (gossip) → p2p router → Controller
                                       ▼
                       ProcessExecutionProofTask::run()
                         spec-ordered pipeline (§ below)
-                        → proof_engine.verify_execution_proof()
+                        → proof_verifier.verify_execution_proof()
                                       │
                                       ▼
                 MutatorMessage::ExecutionProof { result, origin }
@@ -94,16 +103,22 @@ low-priority gossip invariant: snapshot-validate → `Result<Action>` +
 (`messages.rs:172`) is the precedent for omitting `wait_group` on a
 low-priority gossip result.
 
-**Engine trait** (`proof_engine/src/engine.rs`) — mirrors
-`execution_engine/src/execution_engine.rs:22`, full 3-method surface per
-`proof-engine.md:26-40`:
+**Engine traits** (`proof_engine/src/engine.rs`) — the spec's single
+`ProofEngine` protocol, split into a non-generic verifier half and a
+generic prover half:
 
 ```rust
-pub trait ProofEngine<P: Preset> {
-    const IS_NULL: bool;
+/// Verification half: non-generic and object-safe. It is what the task
+/// holds and erases.
+pub trait ProofVerifier: Send + Sync + 'static {
+    fn is_null(&self) -> bool;
 
     fn verify_execution_proof(&self, execution_proof: ExecutionProof) -> bool;
+}
 
+/// Generation half: generic over `P` because `request_proofs` takes the
+/// full `SszNewPayloadRequest<P>`. Nothing wires it in Grandine yet.
+pub trait ProofProver<P: Preset>: Send + Sync + 'static {
     fn request_proofs(
         &self,
         new_payload_request: SszNewPayloadRequest<P>,
@@ -120,27 +135,33 @@ pub trait ProofEngine<P: Preset> {
 }
 ```
 
-- Generic over `Preset`, mirroring `ExecutionEngine<P>`. The proof
-  structs (`ExecutionProof`, envelopes, `ProofData`) are non-generic,
-  but `request_proofs` takes the full `SszNewPayloadRequest<P>`, which
-  wraps `ExecutionPayload<P>` / `ExecutionRequests<P>`
-  (`types/src/eip8025/containers.rs:190`, `types/src/gloas/containers.rs:191`),
-  so the trait must thread `P`. A generic _method_ on a non-generic
-  trait would forbid `Arc<dyn ProofEngine<P>>`, which the task struct
-  below needs. All call sites (`Store<P>`, `MutatorMessage<P>`, the
-  task itself) already carry `P`, so this costs nothing new.
+- The split is an implementation detail of one spec protocol; the union
+  of `ProofVerifier` + `ProofProver<P>` is the spec surface, kept whole
+  so a future prover PR does not fork from `proof-engine.md`.
+- `verify_execution_proof` takes an already-reconstructed
+  `ExecutionProof`, so it needs no `P`. That is what makes
+  `dyn ProofVerifier` legal and lets the erased handle carry no preset.
+  `P` is needed only by `request_proofs`, which the verifier path never
+  calls.
+- Opt-out is the `is_null` method, not `const IS_NULL`. The handle is
+  runtime-selected, so a compile-time const could not fold where it
+  matters, and a const is not `dyn`-compatible (`E0038`). `is_null` is on
+  the non-generic half, so it is callable on concrete engines without
+  naming a preset — avoiding the `E0283` a `fn is_null` on
+  `ProofEngine<P>` hits in the unit tests.
+- No `&E` / `Arc<E>` / `Mutex<E>` forwarding impls (the `ExecutionEngine`
+  twin convention). The task holds `Arc<dyn ProofVerifier>` and calls
+  through `Deref`, and every method is `&self`, so no `Mutex` is needed.
 - `ProofAttributes` is new in `types::eip8025` (spec
   `proof-engine.md:59-65`: `proof_types` sequence; Grandine: a
   `Vec<ProofType>`-shaped container — prover methods are reject-stubs
   in the skeleton, so the bound is deferrable). Added in PR1.
 - Named `ExecutionProofAction`, not a bespoke `ProofOutcome`.
-- Forwarding impls for `&E` / `Arc<E>` / `Mutex<E>`, as with
-  `ExecutionEngine`.
-- `NullProofEngine`: `IS_NULL = true`, `verify` returns `false`
-  (fail-closed), `request_proofs`/`get_proof` return
-  `Err(unsupported)`. The task short-circuits on `IS_NULL` to `Ignore`
-  before any pipeline work, so the fail-closed `false` is unreachable in
-  practice.
+- `NullProofEngine`: `is_null` returns `true`; implements both halves;
+  `verify` returns `false` (fail-closed), `request_proofs`/`get_proof`
+  return `Err(unsupported)`. The task short-circuits on `is_null` to
+  `Ignore` before any pipeline work, so the fail-closed `false` is
+  unreachable in practice.
 - `MockProofEngine`: constructor takes `execution_proof_valid: bool`
   (mirroring `MockExecutionEngine`), canned prover proof/error for the
   stubbed methods.
@@ -154,7 +175,7 @@ Crate layout:
 ```
 proof_engine/src/
   lib.rs
-  engine.rs        # ProofEngine trait + forwarding impls + error type
+  engine.rs        # ProofVerifier + ProofProver<P> traits + error type
   null_engine.rs   # NullProofEngine
   mock_engine.rs   # MockProofEngine
 ```
@@ -168,7 +189,7 @@ external-verifier integration, deferred for later.
 ```rust
 pub struct ProcessExecutionProofTask<P: Preset, W> {
     pub store_snapshot: Arc<Store<P, Storage<P>>>,
-    pub proof_engine: Arc<dyn ProofEngine<P>>,
+    pub proof_verifier: Arc<dyn ProofVerifier>,
     pub mutator_tx: Sender<MutatorMessage<P, W>>,
     pub signed_proof: Arc<SignedExecutionProofEnvelope>,
     pub origin: ExecutionProofOrigin,
@@ -179,11 +200,13 @@ pub struct ProcessExecutionProofTask<P: Preset, W> {
   mutator). Both `Accept` variants end with the identical bare envelope in
   `Store`; the signed carrier keeps `validator_index`/`signature` one hop
   longer for `Seen` marking, logging, and events.
-- Entry point `Controller::spawn_execution_proof_task`; nothing calls it
-  until gossip wiring lands.
+- Entry point `Controller::spawn_execution_proof_task`, taking
+  `proof_verifier: Arc<dyn ProofVerifier>` — no `P` and no repeated
+  `+ Send + Sync` (the trait carries it). Nothing calls it until gossip
+  wiring lands.
 - Queued via a `LowPriorityTask::ExecutionProof` variant (proofs up to
   4 MiB plus BLS and potentially slow external verification).
-- `run()` opens with the `IS_NULL` → `Ignore` short-circuit. Skeleton
+- `run()` opens with the `is_null` → `Ignore` short-circuit. Skeleton
   `run()` is a stub: beyond the short-circuit it returns `Ignore`
   unconditionally, marked `// TODO(eip8025-grandine): spec-ordered
 pipeline` so the follow-up is greppable. The stub exists so PR3's
@@ -214,6 +237,10 @@ execution_proofs: HashMap<H256, HashMap<ProofType, ExecutionProofEnvelope>>,
   across Grandine's validate/apply boundary: the task's snapshot
   validation covers the asserts, the mutator arm performs the store insert
   (only proofs passing downstream verification).
+- The eventual `Store::validate_execution_proof` takes the engine as a
+  non-generic `proof_verifier: &dyn ProofVerifier` (no `impl Trait +
+  ?Sized` dance, no `P` on the handle), so `fork_choice_store` can depend
+  on `proof_engine` directly.
 
 **`Seen` changes** — spec maps verbatim (`p2p-interface.md:40-67`),
 Store-owned like existing `seen_gossip_*`:
@@ -258,26 +285,38 @@ mutator can `origin.split()` for p2p signalling.
 - **New `proof_engine` crate vs living in `fork_choice_control`.** Chose
   the crate for parity with `execution_engine` — both are boundaries to
   an external system.
-- **Engine-boundary alternatives under evaluation.** Both reconcile a
-  `P`-generic engine with the erased handle in
-  `ProcessExecutionProofTask`, and both were built as draft PRs.
+- **Engine-boundary shape: Option A vs Option B vs Option C (chose C).**
+  Recorded in full, not just as a conclusion, so the decision is
+  reviewable later. All three reconcile a `P`-generic engine with the
+  erased handle in `ProcessExecutionProofTask`; two were built as draft
+  PRs and rejected.
   - **Option A — `ProofVerifier<P>` facade** (PR #13,
     `feature/proof-service-task-plumbing-with-proofverifier`). A parallel
     trait blanket-implemented over `ProofEngine<P>`, leaving `const
     IS_NULL` and the engine untouched; the task holds
-    `Arc<dyn ProofVerifier<P>>`. Concern: a second trait that must mirror
-    `verify_execution_proof` (and every future verifier method) can drift;
-    it sits in `fork_choice_control`, which `fork_choice_store` cannot
-    depend on (the dependency direction is reversed), so the eventual
-    `Store::validate_execution_proof` call site cannot name it without a
-    cycle; and it still carries `P` on the handle.
+    `Arc<dyn ProofVerifier<P>>`. Rejected: it is a second trait that must
+    mirror `verify_execution_proof` (and every future verifier method) and
+    can silently drift; it sits in `fork_choice_control`, which
+    `fork_choice_store` cannot depend on (the dependency direction is
+    reversed), so the eventual `Store::validate_execution_proof` call site
+    cannot name it without a cycle; and it still carries `P` on the
+    handle.
   - **Option B — `fn is_null` on `ProofEngine<P>`** (PR #14,
     `feature/proof-service-task-plumbing-fn-is-null`). Object-safe, one
     trait, but `is_null` loses its preset-free home: concrete-engine unit
-    tests hit `E0283` (`NullProofEngine.is_null()` cannot infer `P`),
-    worked around by either turbofish annotations or a non-generic
+    tests hit `E0283` (`NullProofEngine.is_null()` cannot infer `P`).
+    Worked around by either turbofish annotations or a non-generic
     `ProofEngineBase` supertrait, both symptoms of `P` riding on the
-    verifier path.
+    verifier path. Rejected in favour of isolating `P`.
+  - **Option C — verifier/prover split (chosen).** A single `P`-generic
+    trait cannot be the erased handle the task needs: `const IS_NULL` is
+    not `dyn`-compatible (`E0038`). Because `P` is needed solely by
+    `request_proofs`, splitting yields a non-generic, object-safe
+    `ProofVerifier` (usable from `fork_choice_store` and callable on
+    concrete engines without naming a preset) and a generic
+    `ProofProver<P>` that keeps the spec surface intact. A verify-only
+    trait would drop the prover half and fork from `proof-engine.md`; the
+    split keeps it, so a future prover PR does not look like a fork.
 - **Service-owned `get_execution_proof` vs engine-internal context.**
   Service-owned: all inputs (payload, bid, chain/schema IDs) are
   consensus-layer state, and the spec defines it as a pure function of
@@ -307,11 +346,16 @@ its own tests. Stub bodies are marked
 `// TODO(eip8025-grandine): <what replaces them>` so follow-ups are
 greppable.
 
+The chosen engine boundary (Option C, see Trade-offs) reworks the engine
+wiring on top of the task-plumbing PR (#11,
+`feature/proof-service-task-plumbing`); the Option A/B draft PRs
+(#13/#14) close as superseded by it.
+
 | PR                      | Scope                                                                                                                                                                                                                                                                                                                                                                                        | Tests in-PR                                                                                                                                   | Gate                                              |
 | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
-| 1. `proof_engine` crate | `engine.rs` (`ProofEngine<P>` trait + `&`/`Arc`/`Mutex` forwards + `ProofEngineError`), `null_engine.rs`, `mock_engine.rs`, `lib.rs`, `Cargo.toml`, workspace registration; `ProofAttributes` in `types::eip8025`. Prover methods reject per spec.                                                                                                                                           | Null fail-closed (`verify` → `false`, prover methods → `Err`); Mock configured `verify` (true/false) + canned prover proof/error.             | `cargo check/test -p proof_engine` (+ `-p types`) |
+| 1. `proof_engine` crate | `engine.rs` (`ProofVerifier` + `ProofProver<P>` traits + `ProofEngineError`; no forwarding impls), `null_engine.rs`, `mock_engine.rs`, `lib.rs`, `Cargo.toml`, workspace registration; `ProofAttributes` in `types::eip8025`. Prover methods reject per spec.                                                                                                                                           | Null fail-closed (`is_null` → `true`, `verify` → `false`, prover methods → `Err`); Mock configured `verify` (true/false) + canned prover proof/error.             | `cargo check/test -p proof_engine` (+ `-p types`) |
 | 2. State shapes         | `fork_choice_store`: `Store.execution_proofs` field + `get_forkchoice_store` init; `Seen` maps (`execution_proof_roots`, `execution_proof_provers`), Store-owned. Spec shapes verbatim, no behavior, no eviction.                                                                                                                                                                            | Store-init test (`execution_proofs` empty at genesis); `Seen` maps default-empty.                                                             | `cargo check/test -p fork_choice_store`           |
-| 3. Task plumbing        | `fork_choice_control`: `ExecutionProofAction`, `ExecutionProofOrigin`, `MutatorMessage::ExecutionProof` variant, `ProcessExecutionProofTask` with stubbed `run()` (`IS_NULL` → `Ignore`, else stub `Ignore` + `TODO(eip8025-grandine)`), `spawn_execution_proof_task`, `LowPriorityTask::ExecutionProof` variant, mutator arm (stub: no store insert yet, signals p2p per `origin.split()`). | Task smoke test: stub pipeline against `MockProofEngine` (both settings) asserting the emitted outcome message; `NullProofEngine` → `Ignore`. | `cargo check/test -p fork_choice_control`         |
+| 3. Task plumbing        | `fork_choice_control`: `ExecutionProofAction`, `ExecutionProofOrigin`, `MutatorMessage::ExecutionProof` variant, `ProcessExecutionProofTask` with stubbed `run()` (`is_null` → `Ignore`, else stub `Ignore` + `TODO(eip8025-grandine)`), `spawn_execution_proof_task`, `LowPriorityTask::ExecutionProof` variant, mutator arm (stub: no store insert yet, signals p2p per `origin.split()`). | Task smoke test: stub pipeline against `MockProofEngine` (both settings) asserting the emitted outcome message; `NullProofEngine` → `Ignore`. | `cargo check/test -p fork_choice_control`         |
 
 Later work replaces stubs in place, deferred for later: envelope-auth
 body and `get_execution_proof` alongside `client.rs`, then gossip
@@ -327,3 +371,11 @@ wiring, outcome→p2p routing, and recursive anchors.
 - None blocking. k-of-n threshold values deferred (client-side counter
   over distinct `ProofType`s either way); upstream `ProofType`
   assignments remain provisional.
+- `ProofProver<P>` ships unwired: public trait methods do not trip
+  `dead_code`, but if landing an unused trait is unwanted it can be
+  deferred to the first prover PR — the verifier task is unchanged either
+  way.
+- Naming: `ProofEngine` was the spec's name for the whole protocol. The
+  split retires it as a trait name (`ProofVerifier` + `ProofProver<P>`);
+  whether to keep `ProofEngine` for a concrete handle type is a later,
+  cosmetic call.
