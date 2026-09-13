@@ -258,10 +258,26 @@ mutator can `origin.split()` for p2p signalling.
 - **New `proof_engine` crate vs living in `fork_choice_control`.** Chose
   the crate for parity with `execution_engine` — both are boundaries to
   an external system.
-- **Full 3-method trait vs verify-only trait.** Full trait keeps
-  spec-fidelity (`proof-engine.md` defines one protocol); prover methods
-  reject per the spec's explicit permission. A verify-only trait would
-  fork from the spec surface and complicate future prover work.
+- **Engine-boundary alternatives under evaluation.** Both reconcile a
+  `P`-generic engine with the erased handle in
+  `ProcessExecutionProofTask`, and both were built as draft PRs.
+  - **Option A — `ProofVerifier<P>` facade** (PR #13,
+    `feature/proof-service-task-plumbing-with-proofverifier`). A parallel
+    trait blanket-implemented over `ProofEngine<P>`, leaving `const
+    IS_NULL` and the engine untouched; the task holds
+    `Arc<dyn ProofVerifier<P>>`. Concern: a second trait that must mirror
+    `verify_execution_proof` (and every future verifier method) can drift;
+    it sits in `fork_choice_control`, which `fork_choice_store` cannot
+    depend on (the dependency direction is reversed), so the eventual
+    `Store::validate_execution_proof` call site cannot name it without a
+    cycle; and it still carries `P` on the handle.
+  - **Option B — `fn is_null` on `ProofEngine<P>`** (PR #14,
+    `feature/proof-service-task-plumbing-fn-is-null`). Object-safe, one
+    trait, but `is_null` loses its preset-free home: concrete-engine unit
+    tests hit `E0283` (`NullProofEngine.is_null()` cannot infer `P`),
+    worked around by either turbofish annotations or a non-generic
+    `ProofEngineBase` supertrait, both symptoms of `P` riding on the
+    verifier path.
 - **Service-owned `get_execution_proof` vs engine-internal context.**
   Service-owned: all inputs (payload, bid, chain/schema IDs) are
   consensus-layer state, and the spec defines it as a pure function of
