@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Superseded
 authors: [creese]
 workstream: verification
 eip_repo: frisitano/EIPs
@@ -7,7 +7,7 @@ eip_sha: 4855dbeb9a99702a8c4d948ceceb865fb3289759
 consensus_specs_sha: 7d6bd46a015a7dd316c5df855bd89e57c4aa6700
 ssz_specs_sha: 2f7cbc4f82c143e10f3a3cacab52645a8816ef21
 grandine_upstream_sha: 9dc532a7031ce33dc70d42763ad028092d50d393
-superseded_by:
+superseded_by: "0005"
 ---
 
 # 0001 — Represent and hash execution proofs for payload binding
