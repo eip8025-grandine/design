@@ -288,16 +288,15 @@ ssz-specs primitives by the same hand checks neither, so it is a
 consistency check, not a cross-check. EIP-8025 has no `ssz_static`
 vectors.
 
-**Required before Accepted.** At least one implementation independent
-of Grandine must produce expected roots for every changed composed
-type: `ExecutionProof`, `ExecutionProofEnvelope`,
-`SignedExecutionProofEnvelope`, and a payload-derived
-`NewPayloadRequest` and `PublicInput`. A hand-written composition
-over the same ssz-specs primitives does not qualify, and neither does
-recording the gap. The pinned vectors are those roots, and the
-implementation must match them. Choosing the oracle and environment
-is left to the implementer. None of the candidates runs in this
-workbench:
+At least one implementation independent of Grandine must produce
+expected roots for every changed composed type: `ExecutionProof`,
+`ExecutionProofEnvelope`, `SignedExecutionProofEnvelope`, and a
+payload-derived `NewPayloadRequest` and `PublicInput`. A hand-written
+composition over the same ssz-specs primitives does not qualify, and
+neither does recording the gap. The pinned vectors are those roots,
+and the implementation must match them. Choosing the oracle and
+environment is left to the implementer. None of the candidates runs in
+this workbench:
 
 - The pyspec at the #5593 ref covers the proof containers, and is the
   only one that takes declarations from the spec text. No single
