@@ -4,7 +4,7 @@ authors: [creese]
 workstream: verification
 eip_repo: frisitano/EIPs
 eip_sha: 4855dbeb9a99702a8c4d948ceceb865fb3289759
-consensus_specs_sha: c489a99077c16bad7d75053257c50633d12d314d
+consensus_specs_sha: aa16bb4c156184e9548a997d53efaf2a228a6304
 ssz_specs_sha: b42af0a2265c25f5353cace185d066e8d39dbd6e
 grandine_upstream_sha: 34da987dc6e1eec7be6afb6fb3c6edf317f1c32c
 superseded_by:
@@ -33,19 +33,22 @@ consensus-specs `7d6bd46a`/`7fa04483`. As merged, in
 
 Later merged work consumes these types. PR #7 (`981aeb4c`) signs
 `ExecutionProofEnvelope`, and its tests pin an envelope root and
-signing root. PR #9 (`7bad2ca6`) uses `SszNewPayloadRequest<P>` and
-`ProofType` in the `proof_engine` traits, mock and null engine.
+signing root. PR #9 (`7bad2ca6`) uses `SszNewPayloadRequest<P>`,
+`ProofType` and `ProofAttributes` in the `proof_engine` traits, mock
+and null engine.
 
-Upstream sources:
+Upstream sources. The pin is `master` at `aa16bb4c`, tagged
+`v1.7.0-beta.4`.
 
 | Source | Status | Change relevant here |
 | --- | --- | --- |
-| [#5619](https://github.com/ethereum/consensus-specs/pull/5619) (`81e15d3f`) | merged | Removes `SSZNewPayloadRequest`. Gloas [`NewPayloadRequest`](https://github.com/ethereum/consensus-specs/blob/c489a99077c16bad7d75053257c50633d12d314d/specs/gloas/beacon-chain.md#newpayloadrequest) is the same width-4 `ProgressiveContainer`. `VersionedHashes` is Deneb's `List[VersionedHash, MAX_BLOB_COMMITMENTS_PER_BLOCK]`. |
-| [#5593](https://github.com/ethereum/consensus-specs/pull/5593) @ `667e8ea9` | open | `ProofData(ByteList)`, `LIMIT = MAX_PROOF_SIZE`. `ProofType` admits only `ASSIGNED_VALUES`, rejecting others on construction and deserialization. `MAX_PROOF_SIZE` stays a constant, and `MAX_SIGNED_EXECUTION_PROOF_ENVELOPE_SIZE` stays at 4,194,449. |
+| [#5619](https://github.com/ethereum/consensus-specs/pull/5619) (`81e15d3f`) | merged | Removes `SSZNewPayloadRequest`. Gloas [`NewPayloadRequest`](https://github.com/ethereum/consensus-specs/blob/aa16bb4c156184e9548a997d53efaf2a228a6304/specs/gloas/beacon-chain.md#newpayloadrequest) is the same width-4 `ProgressiveContainer`. `VersionedHashes` is Deneb's `List[VersionedHash, MAX_BLOB_COMMITMENTS_PER_BLOCK]`. |
+| [#5593](https://github.com/ethereum/consensus-specs/pull/5593) (`04cc0780`) | merged | [`ProofData(ByteList)`](https://github.com/ethereum/consensus-specs/blob/aa16bb4c156184e9548a997d53efaf2a228a6304/specs/_features/eip8025/beacon-chain.md#new-proofdata), `LIMIT = MAX_PROOF_SIZE`. `ProofType` stays a plain `Uint8`. Gossip now REJECTs empty proof data and types outside `get_supported_proof_types()` = {1, 2, 3} before any lookup or hashing. `MAX_PROOF_SIZE` stays a constant, and `MAX_SIGNED_EXECUTION_PROOF_ENVELOPE_SIZE` stays at 4,194,449. |
+| [#5639](https://github.com/ethereum/consensus-specs/pull/5639) (`e42b2493`) | merged | `ProofEngine` is validation-only. `ProofAttributes`, `request_proofs`, `get_proof` and `prover.md` are removed. |
 | [#5643](https://github.com/ethereum/consensus-specs/pull/5643) @ `b9130f1c` | open | Gloas `VersionedHashes(ProgressiveList[VersionedHash])`, `LIMIT = MAX_BLOB_COMMITMENTS_PER_BLOCK`. |
 | [#5642](https://github.com/ethereum/consensus-specs/pull/5642) @ `638af25c` | open | Moves to ssz-specs `b42af0a2`, where a `ProgressiveList` may declare a `LIMIT`. The limit is checked on construction and decode and never reaches the root (#225). Also makes competing changes to `ProofData`, `MAX_PROOF_SIZE` and the envelope bound. |
 
-Following Francesco's request, the target is #5593 for `ProofData`
+Following Francesco's request, the target is the pin for `ProofData`
 and `ProofType`, #5643 for `VersionedHashes`, and from #5642 only the
 progressive-list limit. #5643 needs that limit. Its ref pins
 `eth-ssz-specs==0.1.0`, whose `ProgressiveList` refuses a declared
@@ -54,16 +57,15 @@ is #5642's revision. `master` itself still pins `0.1.0`.
 
 **Provisional upstream risks.** None of these blocks this design.
 
-- **#5593 and #5642 conflict on `ProofData`.** If #5642's form lands,
-  every proof root returns to the current progressive form, and the
-  envelope and signing vectors change again.
+- **#5642 is not rebased on merged #5593.** Its ref still declares
+  `ProofData(ProgressiveList[Byte])`. If that form lands, every proof
+  root returns to the current progressive form, and the envelope and
+  signing vectors change again.
 - **If #5643 is dropped,** `versioned_hashes` reverts to a list root.
-- **Released vectors already disagree.** v1.7.0-beta.1 Gloas
-  `NewPayloadRequest` `ssz_static` vectors use the list root, so our
-  root deliberately differs from them and from `master` until #5643
-  merges.
-- **`ProofType` assignments are provisional.** Changing the set is a
-  code change.
+- **`versioned_hashes` differs from the pin.** `master` still declares
+  `VersionedHashes` as Deneb's `List`. This design uses #5643's
+  `ProgressiveList`, so the resulting `NewPayloadRequest` root differs
+  from the pinned specification.
 - **`MAX_PROOF_SIZE` is "not definitive".** Under `ByteList` its value
   now reaches the root.
 - **EIP divergences carried from 0001,** still present at the pinned
@@ -85,8 +87,8 @@ is #5642's revision. `master` itself still pins `0.1.0`.
 
 - Rename `types::eip8025::SszNewPayloadRequest<P>` to
   `NewPayloadRequest<P>` in place.
-- Adopt #5593's `ProofData` and `ProofType`, and #5643's progressive
-  `VersionedHashes` with a 4,096 limit.
+- Adopt merged #5593's `ProofData`, keep `ProofType` a plain `u8`,
+  and adopt #5643's progressive `VersionedHashes` with a 4,096 limit.
 - Update #7 signing and #9 `proof_engine` only as far as compilation
   and vectors require.
 - Bounds are unchanged: `MAX_PROOF_SIZE` = 4,194,304 bytes (131,072
@@ -102,7 +104,10 @@ is #5642's revision. `master` itself still pins `0.1.0`.
   envelope-bound removal.
 - No gossip, verification-flow, `Store`, signing-semantics,
   ProofEngine-architecture or recursive-proof changes. #5593's gossip
-  changes belong to [0004](https://github.com/eip8025-grandine/design/pull/9).
+  changes, including the empty-proof and supported-type REJECTs,
+  belong to [0004](https://github.com/eip8025-grandine/design/pull/9).
+- #5639's removal of `ProofAttributes`, `request_proofs` and
+  `get_proof`. See *Open questions*.
 
 ## Design
 
@@ -126,7 +131,7 @@ is #5642's revision. `master` itself still pins `0.1.0`.
 | --- | --- | --- |
 | `SszNewPayloadRequest<P>` | `NewPayloadRequest<P>`, same fields, layout and `new()` | none |
 | `ProofData` | `pub type ProofData = ByteList<MaxProofSize>`; the newtype is deleted | changes for every value, including empty |
-| `ProofType` | validated newtype over `u8` | none for admitted values |
+| `ProofType` | unchanged, `pub type ProofType = u8` | none |
 | `versioned_hashes` | `ProgressiveList<VersionedHash, P::MaxBlobCommitmentsPerBlock>` | changes for every value |
 
 **Rename.** Doc comments and `PayloadBindingError` messages stop
@@ -151,22 +156,13 @@ wrapper, which affects log and test-failure text only. `ByteList`'s
 `From<ContiguousList<u8, MaxProofSize>>` becomes reachable, but it
 is bounded by the type.
 
-**`ProofType`.** A `u8` newtype; `ASSIGNED_VALUES` lives in
-`eip8025`. Every entry point checks membership:
-
-- **`TryFrom<u8>` and `SszRead`:** via the existing
-  `ReadError::Custom`, following the `BooleanInvalid` precedent, so
-  `ssz` needs no change.
-- **`Deserialize` and `FromStr`:** `Display` prints the decimal value,
-  so the field's existing `string_or_native` and `ProofAttributes`'
-  `string_or_native_sequence` still apply.
-
-This keeps today's representations: one byte in SSZ, the `uint8` root,
-a decimal string in JSON (native integers accepted), and native `u8`
-in binary serde. `ProofType` has no `Default`, because 0 is
-unassigned, so the proof containers drop the `derive(Default)` that
-nothing uses. Only membership matters here; what each assigned value
-denotes does not.
+**`ProofType`.** Merged #5593 keeps `ProofType(Uint8)`, so the alias
+stays. SSZ decoding and serde accept all 256 values, as the spec type
+does, and the proof containers keep `derive(Default)`. Membership of
+`get_supported_proof_types()` is a gossip and verification check, not
+a type invariant, so it belongs to 0004. An earlier revision of this
+doc specified a validated newtype from #5593's pre-merge ref
+`667e8ea9`; that form did not merge.
 
 **Versioned hashes.** This depends on an `ssz` change that stands
 without EIP-8025. `ProgressiveList<T>` gains a limit parameter that
@@ -199,10 +195,10 @@ becomes decode-only.
 **Downstream.**
 
 - **#7 signing:** `SignForSingleForkAtSlot` and `0x0F000000` are
-  unchanged. Only vector values change, and the tests'
-  `PROOF_TYPE = 7` no longer decodes.
-- **#9 `proof_engine`:** the rename plus `ProofType` construction in
-  the fixtures. Trait shapes are unchanged.
+  unchanged. Only vector values change. The tests' `PROOF_TYPE = 7`
+  stays: it still decodes, and is unsupported only at gossip.
+- **#9 `proof_engine`:** the rename only. Trait shapes, including
+  `ProofAttributes`, are unchanged.
 
 ## Trade-offs and alternatives
 
@@ -213,6 +209,11 @@ state.
 **Unbounded `ProgressiveList<VersionedHash>`, checked only in
 `new()`.** Derived decoding would then admit up to 2^32 entries where
 #5643 rejects more than 4,096.
+
+**Validate `ProofType` at decode,** as #5593's pre-merge ref did. The
+merged spec keeps `Uint8` and REJECTs unsupported types in gossip, so
+a decode-time check would diverge from it. It would also make a type
+assigned later undecodable rather than merely unsupported.
 
 ## Security and compatibility
 
@@ -226,10 +227,12 @@ with no effect on payload validity or fork choice. A prover that
 derives `new_payload_request_root` differently produces proofs that
 fail verification here, and that fails safe.
 
-**Fixed proof types.** The EIP calls proof types per-node
-configuration, while #5593 fixes them in the type. A node rejects
-envelopes for later-assigned types at decode, which counts as REJECT
-for peer scoring.
+**Proof types.** Decoding admits every `ProofType`, as the spec does.
+Merged #5593 REJECTs unsupported types and empty proof data at the top
+of gossip validation, before the block lookup and before hashing the
+envelope. Until 0004 adopts that, nothing here reaches gossip. The EIP
+still calls the supported set per-node configuration, while the pin
+fixes it in `get_supported_proof_types()`; that too is 0004's.
 
 **Nodes that do not opt in** are unaffected. Nothing is wired into
 consensus, gossip or fork choice. `NullProofEngine` stays the default,
@@ -249,23 +252,23 @@ and no Gloas consensus type outside `types::eip8025` changes root.
 **Tests that change.**
 
 - **`types/src/eip8025/tests.rs`.**
-  - `PROOF_TYPE` 7 → an assigned value.
   - New vectors for `execution_proof_root_matches_reference` and
     `envelope_roots_match_reference`.
   - Encodings and error assertions re-pointed at `ByteList`.
   - `public_input_root_matches_reference` keeps its vector, because
     it uses a fixed placeholder `new_payload_request_root`. It is a
     schema check, not a payload-derived one.
-- **`helper_functions/src/signing/tests.rs`.** `PROOF_TYPE`, and both
-  constants in `signing_root_matches_pinned_vector`.
-- **`proof_engine` tests.** Rename and `ProofType` construction.
+- **`helper_functions/src/signing/tests.rs`.** Both constants in
+  `signing_root_matches_pinned_vector`. `PROOF_TYPE` stays 7.
+- **`proof_engine` tests.** Rename only.
 
 **Tests to add.**
 
-- `ProofType` cases mirroring #5593's `test_proof_type.py`: 0, 4 and
-  255 rejected by `TryFrom`, by SSZ decoding of an envelope whose
-  proof-type byte is mutated, and by serde. JSON keeps the decimal
-  string form.
+- Mirroring #5593's
+  `test_signed_execution_proof_envelope_rejects_oversize_proof_data`:
+  a maximum-size `SignedExecutionProofEnvelope` encodes to exactly
+  4,194,449 bytes, and appending one byte fails decoding at the
+  `ProofData` limit.
 - `ProofData` serde shape unchanged.
 - `ssz`: the limit is enforced, and the root is independent of `N`.
 - Decoding rejects 4,097 versioned hashes.
@@ -298,8 +301,8 @@ and the implementation must match them. Choosing the oracle and
 environment is left to the implementer. None of the candidates runs in
 this workbench:
 
-- The pyspec at the #5593 ref covers the proof containers, and is the
-  only one that takes declarations from the spec text. No single
+- The pyspec at the pin covers the proof containers, and is the only
+  one that takes declarations from the spec text. No single
   upstream ref yields `NewPayloadRequest` under #5643, which cannot
   build alone.
 - The ssz-specs Python reference implementation at `b42af0a2` needs
@@ -314,3 +317,19 @@ The pre-#5643 Gloas `NewPayloadRequest` `ssz_static` vectors cannot
 validate the new root by design. They also do not exist in this
 fork's v1.7.0-beta.0 set, and upstream ignores them. That is a known
 limitation of targeting an open spec change.
+
+## Open questions
+
+**Deferred.**
+
+- **#5639.** `ProofAttributes`, `request_proofs` and `get_proof` are
+  gone upstream but remain in `proof_engine` and `types::eip8025`.
+  Removing them is a ProofEngine-architecture change for its own doc,
+  or for 0004 if it owns the engine interface.
+- **Supported proof types and empty proofs.** #5593's gossip REJECTs
+  and `verify_execution_proof_envelope`'s non-empty check belong to
+  0004. So does reconciling the pin's fixed set {1, 2, 3} with the
+  EIP's per-node configuration.
+- **`eth-ssz-specs` version.** `master` pins `0.1.0`; the pinned
+  `ssz_specs_sha` is #5642's `b42af0a2`. This resolves when #5642
+  merges or is replaced.
