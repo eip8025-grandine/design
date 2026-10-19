@@ -2,10 +2,11 @@
 status: Draft
 authors: [keshavsharma25]
 workstream: verification
-eip_repo: frisitano/EIPs
+eip_repo: ethereum/EIPs
 eip_sha: 9207c6011f526bd40abd79649484a1a342585bd4
-consensus_specs_sha: 6946894b02f6e95bf5b1daf4ce39a3c3244a1e41
-grandine_upstream_sha: e896cbd41bf885852c501ac0de2a6ff4e7376cc1
+consensus_specs_sha: 12c8b24bc09b12f62688d439ba20ef00b1fdfe1f
+grandine_upstream_sha: 34da987dc6e1eec7be6afb6fb3c6edf317f1c32c
+grandine_stack_tip: df9f361167a645dac569802e8dd9d69952e4a761
 superseded_by:
 ---
 
@@ -13,160 +14,252 @@ superseded_by:
 
 ## Context
 
-The proof-engine boundary, store shapes, and control task exist. This design
-replaces the validation stub in `fork_choice_control/src/tasks.rs:752` and the
-bare-message storage stub in `fork_choice_control/src/mutator.rs:2641`.
+Execution proofs are supplementary, non-consensus artifacts. This design
+covers their authentication, binding to accepted payloads, verification and
+storage without changing payload validity or fork choice.
 
-Implement the `feat/simplify-eip8025` consensus-specs snapshot pinned above,
-on top of Grandine's `feature/proof-service-task-plumbing-verifier-prover-split`
-(PR #15). It uses progressive `ProofData`, `SSZNewPayloadRequest`, and runtime
-proof-type checks. Later spec and peer-owned type changes need a separate PR.
+The pipeline separates **prepare → admit → verify → complete**. Workers
+establish trusted input and verify proofs; the mutator owns live admission,
+proof bookkeeping and storage.
+
+The pinned consensus-specs baseline uses bounded `ByteList` proof data,
+`NewPayloadRequest` and runtime proof-type checks. Grandine retains
+[#18](https://github.com/eip8025-grandine/grandine/pull/18)'s selected extension:
+progressive versioned hashes from [consensus-specs #5643](https://github.com/ethereum/consensus-specs/pull/5643)
+at `b9130f1c`, with [#5642](https://github.com/ethereum/consensus-specs/pull/5642)'s
+selected progressive-list limit semantics.
+
+`grandine_stack_tip` pins the reference revision; `grandine_upstream_sha` is
+its underlying `upstream/develop` merge-base. The proof-engine boundary and
+Store/control shapes are dependencies of this three-PR design.
 
 ## Goals and non-goals
 
-**Goals:** Authenticate the envelope, bind it to the accepted payload, verify
-the proof, and return ACCEPT / REJECT / IGNORE. Store verified bare messages
-and Seen keys; prune all three maps at finalization. Keep the existing
-read-only validation / mutator-only apply split.
+**Goals:** Trusted preparation, atomic pre-engine deduplication, correct
+verdicts, first-valid storage and consistent retirement. Keep expensive work
+off the mutator and bookkeeping writes on it.
 
-**Non-goals:** New P2P topics, subscriptions, RPC or HTTP ingress; proof
-generation; changes to `ProofProver<P>`; peer-owned container changes;
-restart recovery or a new cache-retention policy.
+**Non-goals:** New topics, subscriptions, RPC/HTTP ingress; unselected
+container/spec migrations; restart recovery or a new cache-retention policy.
 
 ## Design
 
 ```text
-existing ingress → Controller::spawn_execution_proof_task [low priority]
-  → ProcessExecutionProofTask (snapshot; Null engine → Ignore)
-  → Store::validate_execution_proof_gossip (read-only)
-  → MutatorMessage::ExecutionProof { result, origin }
-  → Mutator::handle_execution_proof
-      Accept → Store::apply_execution_proof + update_store_snapshot()
-      Ignore / Err → existing origin.split() signalling
+internal submission → low-priority preparation worker (coherent Store snapshot)
+  → mutator: live checks + atomic paired Seen admission
+      decline → terminal origin result
+      admit   → publish bookkeeping snapshot; schedule engine worker
+  → engine worker: verify the exact admitted ExecutionProof
+  → mutator: applicability check + completion/storage
+      → publish changed bookkeeping; terminal origin result
 ```
 
-`fork_choice_store` adds a `proof_engine` dependency:
+Workers must not hold a mutator lock or wait for admission replies. Expensive
+BLS, state materialization, payload hashing and engine calls stay off the
+mutator; only short live-store decisions are serialized.
 
-```rust
-pub fn validate_execution_proof_gossip(
-    &self, signed_proof: Arc<SignedExecutionProofEnvelope>,
-    proof_verifier: &dyn ProofVerifier,
-) -> Result<ExecutionProofAction>;
+### Preparation establishes trust, not admission
 
-pub fn apply_execution_proof(
-    &mut self, signed_proof: Arc<SignedExecutionProofEnvelope>,
-) -> bool; // false for a duplicate racing snapshot validation → Ignore
-```
+Preparation returns a protected prepared carrier, IGNORE, protocol rejection
+or local error. It cannot authorize engine entry from a potentially stale
+snapshot or change proof bookkeeping. State/public-key cache warming is allowed.
 
-**Gossip order** — `specs/_features/eip8025/p2p-interface.md`,
-`validate_execution_proof_gossip`:
+**Ordered checks** follow the pinned
+[gossip validator](https://github.com/ethereum/consensus-specs/blob/12c8b24bc09b12f62688d439ba20ef00b1fdfe1f/specs/_features/eip8025/p2p-interface.md#new-execution_proof).
+Let B = target block root, T = proof type, V = validator index and
+R = the bare `ExecutionProofEnvelope` root, not its signed wrapper.
 
-| #   | Check                                           | Result                             |
-| --- | ----------------------------------------------- | ---------------------------------- |
-| 0   | Hash the bare envelope                          | Before any IGNORE                  |
-| 1   | Proof root already Seen for this block          | IGNORE                             |
-| 2   | Block unknown                                   | IGNORE                             |
-| 3   | Known block lacks valid post-state              | REJECT                             |
-| 4   | Payload unavailable                             | IGNORE                             |
-| 5   | Verified proof already stored for (block, type) | IGNORE                             |
-| 6   | Prover already Seen for (block, type, index)    | IGNORE                             |
-| 7   | `verify_execution_proof_envelope` fails         | REJECT                             |
-| 8   | `get_execution_proof`                           | Build engine input                 |
-| 9   | Mark authenticated root and prover Seen         | Before engine verification; see D3 |
-| 10  | Proof-engine verification fails                 | REJECT; otherwise ACCEPT           |
+| Order | Check/action                                              | Outcome on failure       |
+| ----- | --------------------------------------------------------- | ------------------------ |
+| 1     | Non-empty proof                                           | REJECT                   |
+| 2     | Supported proof type                                      | REJECT                   |
+| 3     | Known B                                                   | IGNORE                   |
+| 4     | No verified proof for (B, T)                              | IGNORE                   |
+| 5     | Compute R; require unseen (B, R)                          | IGNORE                   |
+| 6     | Require unseen (B, T, V)                                  | IGNORE                   |
+| 7     | Accepted payload and exact trusted target state available | IGNORE                   |
+| 8     | Authenticate signed envelope                              | Typed protocol rejection |
+| 9     | Bind engine input; construct protected carrier            | Local error              |
 
-**Envelope authentication** — `beacon-chain.md`,
-`verify_execution_proof_envelope`: check (1) envelope/payload block-root
-equality, (2) validator index bounds, (3) `0 < len(proof_data) <= MAX_PROOF_SIZE`
-(4 MiB), (4) proof type in `{1, 2, 3}`, (5) active validator at
-`get_current_epoch(state)` in the proven block's post-state, then (6) BLS
-signature over the envelope's signing root with the validator pubkey and
-`DOMAIN_EXECUTION_PROOF` at `compute_epoch_at_slot(state.slot)`. Reuse
-`SignForSingleForkAtSlot::verify`; do not duplicate PR #7's signing code.
+**Trusted context:** a peer supplies proof bytes, not trusted public input.
+Require the payload-acceptance marker plus matching full envelope for B/slot;
+the marker alone supplies neither payload data nor an EL VALID verdict.
+Use B's exact post-state, not head state. Check resident/cache-hit association,
+ancestry seeds before replay, and output before cache publication so a local
+reconstruction error cannot become trusted context. Unavailable/inconsistent
+context is local IGNORE, not evidence against the peer.
 
-**Binding** — `beacon-chain.md`, `get_execution_proof`: build
-`SszNewPayloadRequest<P>` from the accepted envelope's payload, parent root,
-and execution requests, plus versioned hashes of
-`state.latest_execution_payload_bid.blob_kzg_commitments` (using the existing
-`kzg_commitment_to_versioned_hash` helper). Hash the request into
-`PublicInput.new_payload_request_root`. Set `successful_validation = true`,
-`chain_id = DEPOSIT_CHAIN_ID`, and `schema_id = STATELESS_INPUT_SCHEMA_ID`
-(`0x1501`); carry the envelope's proof type and data into `ExecutionProof`.
-Do not replace the existing Grandine request type in this series.
+**Authentication/binding:** index → non-empty data → supported type `{1, 2, 3}`
+→ activity → BLS, using the target state's epoch and `DOMAIN_EXECUTION_PROOF`.
+Reconstruct `NewPayloadRequest` from accepted payload/parent/requests and
+state-derived versioned hashes. `PublicInput` contains its root, success=true,
+configured deposit chain ID and schema `0x1501`, never peer-chosen input.
 
-**Storage and retention** — Store the bare `.message` under `(block root,
-proof type)` using `entry().or_default()`. Seen maps hold proof roots per block
-and prover keys `(block root, type, validator index)`. Only the mutator writes;
-a duplicate racing validation becomes IGNORE. Prune all three maps together
-with the existing finalization sweep.
+**Protected provenance:** authentication of one envelope cannot authorize
+another input. Carry the authenticated envelope, cached R, prover key and
+immutable bound proof together. Context identity is B plus **complete**
+`PublicInput`, not an allocation identity. Preparation implies neither
+engine validity nor final gossip ACCEPT; binding/consistency errors are local.
 
-**Grandine mappings and deviations**
+### Serialized admission closes the snapshot race
 
-- **D1 — payload:** `store.payloads` is a set, not the spec's envelope map.
-  Fetch the accepted envelope from `ExecutionPayloadEnvelopeCache` after the
-  payload-availability check; a cache miss is IGNORE, never bind other data.
-- **D2 — post-state:** use the proven block's chain-link state. If a block is
-  known but its post-state is unavailable, REJECT, not IGNORE.
-- **D3 — Seen timing:** the spec marks authenticated attempts before engine
-  verification; our validate/apply split needs a mutator path for engine-invalid
-  attempts. Decide before PR2 (below).
-- **D4 — helper split:** store helpers separate authentication from binding;
-  their doc comments link to the corresponding spec functions.
-- **D5 — decode bound:** existing `ProofData` rejects oversized bytes at
-  construction/decoding. Keep the runtime size and type checks in envelope
-  authentication; do not add a proof-type decode guard. Test oversized input
-  at decoding, since it cannot become an in-memory `ProofData`.
+Workers validate against immutable Store snapshots. Two workers can observe
+the same keys as unseen and both enter the verifier before either completion
+updates the Store. Snapshot-local Seen updates cannot serialize that decision;
+engine entry therefore requires admission against the live Store. This addresses
+the [Seen-timing concern discussed in PR10](https://github.com/eip8025-grandine/grandine/pull/10#discussion_r4308234602).
+
+For two candidates sharing either duplicate key, prepared from snapshot S0:
+
+| Step                 | Without live admission          | With serialized admission                  |
+| -------------------- | ------------------------------- | ------------------------------------------ |
+| Workers A/B check S0 | Both see unseen keys            | Both may prepare                           |
+| A reaches live Store | No pre-engine transition        | Check and insert both keys                 |
+| B reaches live Store | Still free to enter engine      | Observe A's key; decline without insertion |
+| Engine work          | Duplicate verification possible | Only the admitted competitor enters        |
+
+One mutator transition checks retention, trusted context, verified (B, T)
+storage and **both** Seen keys, then inserts (B, R) and (B, T, V) together
+before engine scheduling. A decline inserts neither key; partial insertion
+could suppress another genuine attempt. Authentication precedes insertion
+so forged signatures cannot consume another validator's key.
+
+Seen records **authenticated attempts**, not successful proofs. Both keys
+remain consumed until retirement to suppress repeated invalid proofs and
+changed bytes under the same prover key. This sacrifices same-key retry after
+local/scheduling failure, even if work never starts; no pending ownership,
+rollback or retry-release protocol is promised.
+
+**Live applicability:** admission/completion require retained B and unchanged
+trusted statement provenance. Use block-root invariants and content identity,
+not expensive reconstruction on the mutator. Unrelated publications,
+equivalent allocations and another proof finishing first do not change the
+statement. Never silently rebind to different input. Inapplicability is local
+IGNORE, not panic/REJECT; cache residency alone is not context identity.
+
+### Completion separates attempt verdicts from verified storage
+
+Completion accepts only a verdict tied to the exact admitted engine input,
+never an arbitrary envelope plus a claimed verification result.
+
+Same R/different V and different R/same (B, T, V) are duplicates. Distinct R
+and prover keys may overlap before verified storage; an exclusive (B, T) gate
+would exceed the spec's two-key rule. Completion rechecks applicability before
+interpreting the verdict:
+
+| Completion                      | Gossip outcome | Storage                                                        |
+| ------------------------------- | -------------- | -------------------------------------------------------------- |
+| Engine true                     | ACCEPT         | Store the first valid bare message for (B, T); never overwrite |
+| Engine false                    | REJECT         | None; retain Seen                                              |
+| Separately reported local fault | IGNORE         | None; retain Seen                                              |
+| Retired/inapplicable target     | IGNORE         | No insertion or resurrection                                   |
+
+If another valid attempt stores first, an admitted true still ACCEPTs without
+overwriting; an admitted false still REJECTs. Only **new admissions** IGNORE
+occupied storage. Proof bytes are not canonical. Protected input/result
+provenance permits one off-mutator engine call instead of repeat verification
+on apply.
+
+### Retirement is shared by admission, storage and Seen
+
+Keep precisely the latest finalized anchor and roots in
+`unfinalized_locations`. During finalization pruning, after updating that
+domain and removing orphans, apply it to `execution_proofs`,
+`execution_proof_roots` and `execution_proof_provers` together. Independent
+Seen eviction could reopen duplicate admission while work still runs.
+Keeping verified proofs after their target blocks are retired would retain
+history this pipeline no longer uses.
+
+Remove older finalized ancestors and discarded branches, including recent-slot
+orphans. Retirement follows block identity, not an epoch-wide slot cutoff.
+
+Admission/completion use the same domain, so historical chain-link access
+cannot readmit retired targets and late results cannot recreate pruned records.
+The local retirement IGNORE must not preempt early empty/type REJECTs.
+A skipped epoch-boundary slot may leave the retained anchor without a cached
+full payload envelope; unavailable context is IGNORE, not substitution.
+
+### Non-blocking orchestration preserves the authority boundary
+
+Preparation sends its result and exits; admission schedules another worker,
+rather than occupying shared workers waiting for mutator replies. Handoffs
+preserve provenance and origin; snapshots published after admission and
+storage/pruning avoid redundant work but do not replace live checks.
+
+Keep `ProofVerifier::verify_execution_proof(ExecutionProof) -> bool`, using
+`hash_tree_root(public_input)`. The null-engine guard returns IGNORE **before**
+preparation/admission: disabled is not invalid. Enabled true/false are proof
+verdicts; separately reported context/scheduling faults are local IGNORE,
+never generic peer REJECT. No backend error/cancellation API is added.
+
+Transfer origin ownership between stages for one normal-path terminal gossip/
+API result. Declines finish without engine work. Scheduling failure after
+admission reports local IGNORE and leaves Seen consumed.
 
 ## Trade-offs and alternatives
 
-Snapshot validation keeps slow proof-engine work off the mutator, but apply
-must reject a racing duplicate. Carry `Arc<SignedExecutionProofEnvelope>` on
-Accept so the mutator can record the prover; persist only `.message`.
-
-**D3 is open:** marking Seen only on Accept lets the same authenticated,
-engine-invalid proof repeatedly consume BLS and engine work. The spec marks it
-Seen before the engine call. One option is a `RejectVerified(signed)` result:
-the mutator marks that attempt Seen, then signals REJECT. Authentication
-failures must not mark Seen.
+| Choice                                          | Rejected alternative                       | Deciding trade-off                                                    |
+| ----------------------------------------------- | ------------------------------------------ | --------------------------------------------------------------------- |
+| Live pre-engine paired admission                | Snapshot-only or completion-only Seen      | Extra handoff buys atomic duplicate exclusion before expensive work   |
+| Permanent Seen until retirement                 | Retryable pending ownership/release        | Less lifecycle/recovery machinery, but no same-key local-fault retry  |
+| Two-key exclusion                               | Exclusive per-(B, T) in-flight gate        | Preserves independent attempts; needs separate finite resource limits |
+| Content-based trusted context                   | Pointer/global-generation identity         | Equivalent allocations/unrelated updates do not discard valid work    |
+| Non-blocking workers, short mutator transitions | Waiting workers or verification on mutator | More message stages, but no verifier latency on the serialized path   |
 
 ## Security and compatibility
 
-Keep the pre-decode `MAX_SIGNED_EXECUTION_PROOF_ENVELOPE_SIZE` cap and the
-`ProofData` bound. The pinned check order hashes an envelope before the early
-IGNOREs; dedup only saves repeat BLS/engine work if D3 is resolved. An invalid
-proof does not invalidate an accepted payload or change fork-choice weights.
-A null proof engine returns IGNORE before validation. Cache eviction yields
-IGNORE, not verification against an unrelated payload.
+`ProofData` enforces its 4 MiB bound at construction/decoding. Ingress must
+enforce the 4,194,449-byte signed-envelope cap before decoding; defining the
+constant alone does not enforce a network limit. Proof type remains a u8 with
+runtime support checks, not a decode guard.
+
+Cheap prechecks avoid unnecessary proof hashing/BLS; live admission prevents
+duplicate engine calls, not duplicated pre-admission BLS or unlimited distinct
+attempts. Invalid/withheld proofs cannot change payload status, beacon state
+or fork-choice weights. No durable Seen/restart or abrupt-stop recovery is
+promised; retained-domain pruning is not a hard memory cap during non-finality.
+
+Finite queued-byte/work and concurrency limits are prerequisites for live
+ingress. Low priority is not isolation or DDoS protection. Preparation includes
+O(proof bytes) hashing plus BLS/replay/binding; engine cost is backend-specific.
+Map checks are expected-average O(1), subject to copy-on-write costs; pruning
+scans bookkeeping. Existing logs/metrics should distinguish stage outcomes,
+duplicates, local faults, pruning and queue/engine latency without proof data
+or high-cardinality labels.
 
 ## Implementation and testing
 
-Stack on `feature/proof-service-task-plumbing-verifier-prover-split`. Use the
-pinned spec and current Grandine types for all three PRs; run affected tests,
-formatting, and clippy (`scripts/ci/clippy.bash`).
+| PR                                                                | Responsibility                                                                                                       | Required evidence                                                                                                           |
+| ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| PR1 ([#17](https://github.com/eip8025-grandine/grandine/pull/17)) | Authentication/binding helpers, ordered preparation, trusted context and protected prepared provenance               | Precedence, signature/type/bounds, replay/cache safety, carrier consistency and unchanged proof bookkeeping                 |
+| PR2                                                               | Live applicability, paired permanent-Seen admission, admitted/completion provenance, first-valid storage and pruning | Atomic exclusion/no partial insertion, local-fault/invalid replay suppression, distinct verdicts, retention/no resurrection |
+| PR3                                                               | Messages, non-blocking workers, engine scheduling, snapshots, opt-out and terminal signalling                        | Controlled interleavings, actual engine-call counts, published bookkeeping and single terminal replies                      |
 
-| PR  | Scope                                                                          | Tests                                                                                                                                                                              |
-| --- | ------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PR1 | IGNORE/REJECT errors; `verify_execution_proof_envelope`; `get_execution_proof` | Valid signature; root, empty data, type, index, activity, and BLS failures; oversize decode rejection; pre-Gloas binding error; fields/root against a separately assembled request |
-| PR2 | Ordered gossip validation; apply, Seen, mutator Accept, pruning; settle D3     | Every IGNORE/REJECT path including missing post-state; duplicate race; engine-invalid replay; pruning                                                                              |
-| PR3 | Replace task stub; finish controller/mutator wiring                            | Mock engine: Accept, Reject, Null Ignore, duplicate Ignore; replay engine-call count                                                                                               |
+Each PR builds/tests independently. PR1 has no lifecycle dependency; PR2 keeps
+admission/completion/pruning together; PR3 connects the full enforced lifecycle.
+
+Boundary cases include early empty/type precedence; both-key races; true/true
+and mixed verdict orders; local faults; anchor/skipped-slot retention; recent
+orphans and late results. PR3 must prove actual engine-call exclusion and
+single replies with controlled interleavings; Store-only tests cannot.
+
+Independent selected-target binding vectors establish interoperability;
+Grandine-derived roots are regression coverage, not independent oracles.
 
 ## Deferred spec and type alignment
 
-- A fixed expected binding root derived from the pinned pyspec or another
-  implementation would strengthen PR1's tests. The pinned tests compute it
-  dynamically; PR1's separate request assembly is sufficient for this series.
-  Re-derive a golden root if the request shape changes.
-- [#5593](https://github.com/ethereum/consensus-specs/pull/5593) proposes
-  `ByteList` proof data, a proof-type decode guard, a different request shape,
-  and changed gossip/auth checks. Re-pin and re-test SSZ roots, envelope size,
-  and binding when the peer-owned type work lands; do not anticipate it here.
-- Draft [#5639](https://github.com/ethereum/consensus-specs/pull/5639) would
-  remove proof production from the consensus-layer interface. Keep the current
-  verifier/prover boundary for this series.
+Use the pinned global gossip model, not type-mapped subnets. #5729's
+payload-dependency removal and unselected #5642 changes require separate
+alignment; this design requires accepted payload context and retains the
+size caps. Rebaseline roots/bounds together if the request shape changes.
+Historical proof serving, durable recovery and live ingress are separate
+workstreams.
 
-## Blockers and open questions
+## Open questions
 
-- Decide D3's engine-invalid Seen path before PR2.
-- Confirm cache lifetime versus retained blocks/proofs; cache miss remains IGNORE.
-- Check whether a known Grandine block can lack post-state, and how to retain
-  the spec's REJECT behavior in that case (D2).
+- The integration must demonstrate the sufficient cheap live-context predicate
+  from B's trusted acceptance/provenance; pointer equality, cache residency and
+  global snapshot generations are not substitutes.
+- Real-backend operational-failure semantics and measured resource budgets
+  require separate integration/exposure design; boolean false must not be
+  overloaded with local unavailability.
