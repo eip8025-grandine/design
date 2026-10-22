@@ -290,14 +290,18 @@ binding() }`, sits behind the map.
   needs a Cargo feature, a `BackendSpec` variant and a binding rule.
 - **SP1.** ere's
   [`SP1Proof`](https://github.com/eth-act/ere/blob/c0c411ae9215e0f72a00d52e32e267b30ef48606/crates/verifier/sp1/src/proof.rs)
-  codec is legacy bincode. It accepts only compressed proofs, rejects
-  trailing bytes, and bounds allocations (ere #423). The verifier
-  checks the embedded public values against the proof digest. The
-  exit-code check needs ere ≥ v0.19.1 (#446). Binding is exact.
+  codec is legacy bincode. It decodes any SP1 proof kind, rejects
+  trailing bytes, and bounds allocations (ere #423). Verification
+  accepts only compressed proofs, so any other kind gives `Verify`,
+  not `Decode`. The verifier checks the embedded public values against
+  the proof digest. The exit-code check needs ere ≥ v0.19.1 (#446).
+  Binding is exact.
 - **Mock.** Two `ByteList<MaxProofSize>` fields with standard offsets;
   `proof` is ignored. It must decode zkboost's vector `08000000
   0b000000 aaaaaa bbbb`. Binding is exact, because zkboost commits the
-  unpadded 43 bytes.
+  unpadded 43 bytes. Standard offsets give `proof` every byte after
+  `public_values`, so appended bytes extend `proof` rather than
+  failing decode. Malformed offsets give `Decode`.
 - **OpenVM and ZisK (future)** zero-pad public values. They will need
   the zero-padding binding of Prysm's `publicValuesMatch`.
 
@@ -499,9 +503,8 @@ exercises PR 1's root.
 
 **Acceptance.** PR 2 needs one *primary fixture* to verify under ere
 v0.19.2. A primary fixture is a genuine zkboost execution proof, its
-committed public values and its guest's VK. This has not been run yet.
-Candidates are tried in order, and the first that verifies is checked
-in:
+committed public values and its guest's VK. Candidates are tried in
+order, and the first that verifies is checked in:
 
 1. the ethrex proof;
 2. the reth proof, with the same `public_values.bin`;
@@ -533,7 +536,8 @@ cases use a non-mainnet `Config`.
 | `successful_validation = false` | `UnsuccessfulValidation` |
 | Types 0 and 255, and an unconfigured type | `UnsupportedProofType` |
 | Mock with matching, changed or zero-padded values | `Ok`, then `PublicValuesMismatch` twice |
-| Mock with bad offsets or trailing bytes; zkboost's vector | `Decode`; decodes |
+| Mock with bad offsets; zkboost's vector | `Decode`; decodes |
+| Mock with bytes appended after `proof` | `Ok`: they extend `proof` |
 | Mock with `chain_id = 1` | `MockOnMainnet` |
 | `MockProof` under an SP1 type | `Decode` |
 | A `cfg(test)` backend that panics or errors | `Panic` or `Verify` |
@@ -549,16 +553,16 @@ mock entry under a non-mainnet `Config` returns `Ok`.
 
 **Run.**
 
-- `cargo test --release -p types -p proof_engine --features bls/blst`,
-  with and without `proof_engine/sp1`.
+- `cargo test --release -p types -p proof_engine -p bls --features
+  bls/blst --lib`, with and without `proof_engine/sp1`.
 - With the caller change: `cargo test --release -p fork_choice_store
   -p bls -p kzg_utils --features bls/blst,kzg_utils/blst --lib`. Read
   the per-crate results, because `kzg_utils`'s own tests fail there.
 - `scripts/ci/clippy.bash --deny warnings`, plus clippy on `-p types
   -p proof_engine` with `bls/blst,proof_engine/sp1`.
 - `cargo fmt -- --check` inside each touched crate.
-- PR 2: a release `grandine` build with
-  `default-networks,proof_engine/sp1`.
+- PR 2: `cargo build --release -p grandine -p proof_engine --features
+  grandine/default-networks,proof_engine/sp1`.
 
 On a cold cache, ere's `build.rs` runs `cargo metadata` over ere's
 workspace: about 500 packages from 19 git repositories. CI therefore
