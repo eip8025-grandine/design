@@ -1,5 +1,5 @@
 ---
-status: Draft
+status: Accepted 
 authors: [creese]
 workstream: verification
 eip_repo: frisitano/EIPs
