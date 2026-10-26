@@ -236,11 +236,21 @@ structure. Everything else is checked downstream.
   topic in this fork already behaves this way. Application-level
   `report_peer` penalties belong to Grandine's `p2p` layer. See *Open
   questions*.
-- Memory: because `validate_messages` is set, `mcache` holds only
-  ACCEPTed messages, and the spec forwards at most one valid proof per
-  (block, type). Proofs are above the 1,000-byte `IDONTWANT` threshold,
-  which cuts duplicate transfers. Unpublished proofs are not held in the
-  gossip cache.
+- Memory: gossipsub puts each inbound message in `mcache` on receipt.
+  A REJECT or IGNORE removes it; otherwise it stays for
+  `history_length` (12) heartbeats. Only ACCEPTed messages are
+  forwarded or advertised. The spec does not limit ACCEPTs to one
+  proof per (block, type). Its duplicate keys are the proof root and
+  (block, type, validator), and a stored proof only stops new
+  admissions, so proofs from distinct provers admitted before the
+  first valid one is stored can each ACCEPT (0004). Each extra ACCEPT
+  needs distinct valid proof bytes and a distinct active validator.
+  Cache occupancy therefore depends on the volume of messages received
+  within that window. The finite validation queue and byte limits in
+  0004 bound queued work, but do not directly cap `mcache` occupancy.
+  Proofs are above the 1,000-byte `IDONTWANT` threshold, which cuts
+  duplicate transfers. Unpublished proofs are not held in the gossip
+  cache.
 
 **Invalid or withheld proofs.** `eth2_libp2p` gives no verdict on a
 proof. A malformed message is REJECTed here. A well-formed invalid
