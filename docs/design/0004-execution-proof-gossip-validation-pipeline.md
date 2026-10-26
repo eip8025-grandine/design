@@ -5,8 +5,10 @@ workstream: verification
 eip_repo: ethereum/EIPs
 eip_sha: 9207c6011f526bd40abd79649484a1a342585bd4
 consensus_specs_sha: 12c8b24bc09b12f62688d439ba20ef00b1fdfe1f
-grandine_upstream_sha: 34da987dc6e1eec7be6afb6fb3c6edf317f1c32c
-grandine_stack_tip: df9f361167a645dac569802e8dd9d69952e4a761
+ssz_specs_sha: b42af0a2265c25f5353cace185d066e8d39dbd6e
+grandine_upstream_sha: a63876249043020d8ebe3d410c5cf31b19be1cc2
+grandine_pr_base: c736de6f05b2bdecb3d166e3e396dc6ab91d2e1f
+grandine_stack_tip: e014f0fbed46046c5dfdf0d9ac1078bdd366d406
 superseded_by:
 ---
 
@@ -30,8 +32,15 @@ at `b9130f1c`, with [#5642](https://github.com/ethereum/consensus-specs/pull/564
 selected progressive-list limit semantics.
 
 `grandine_stack_tip` pins the reference revision; `grandine_upstream_sha` is
-its underlying `upstream/develop` merge-base. The proof-engine boundary and
-Store/control shapes are dependencies of this three-PR design.
+its underlying `upstream/develop` merge-base; `grandine_pr_base` pins PR2's base.
+`ssz_specs_sha` pins the selected progressive-list semantics, not latest master.
+
+**Status:** PR1 ([#17](https://github.com/eip8025-grandine/grandine/pull/17))
+is merged into the selected base. PR2
+([#25](https://github.com/eip8025-grandine/grandine/pull/25)) implements the Store
+lifecycle described in [0010](0010-execution-proof-store-lifecycle.md); final verification/review
+remain pending. PR3 service wiring is not implemented. Physical pruning is a
+separate follow-up.
 
 ## Goals and non-goals
 
@@ -41,6 +50,7 @@ off the mutator and bookkeeping writes on it.
 
 **Non-goals:** New topics, subscriptions, RPC/HTTP ingress; unselected
 container/spec migrations; restart recovery or a new cache-retention policy.
+Physical proof-bookkeeping cleanup is deferred, not delivered by PR2/PR3.
 
 ## Design
 
@@ -53,6 +63,8 @@ internal submission → low-priority preparation worker (coherent Store snapshot
   → mutator: applicability check + completion/storage
       → publish changed bookkeeping; terminal origin result
 ```
+
+This is the intended integrated flow; PR3 must connect the existing boundaries.
 
 Workers must not hold a mutator lock or wait for admission replies. Expensive
 BLS, state materialization, payload hashing and engine calls stay off the
@@ -94,6 +106,9 @@ context is local IGNORE, not evidence against the peer.
 Reconstruct `NewPayloadRequest` from accepted payload/parent/requests and
 state-derived versioned hashes. `PublicInput` contains its root, success=true,
 configured deposit chain ID and schema `0x1501`, never peer-chosen input.
+The selected binding uses the zkBoost-compatible request root and exact SSZ
+public-input bytes, not the spec's progressive-root/public-input-root convention.
+Independent vectors are needed before interoperability sign-off.
 
 **Protected provenance:** authentication of one envelope cannot authorize
 another input. Carry the authenticated envelope, cached R, prover key and
@@ -132,7 +147,11 @@ rollback or retry-release protocol is promised.
 
 **Live applicability:** admission/completion require retained B and unchanged
 trusted statement provenance. Use block-root invariants and content identity,
-not expensive reconstruction on the mutator. Unrelated publications,
+not expensive reconstruction on the mutator. PR2 requires retained B, its
+accepted-payload marker and equality of the complete captured public input.
+Context capture is best-effort after successful ordinary EL notification; its
+failure cannot veto payload acceptance, and replacement without context clears
+old authority. Unrelated publications,
 equivalent allocations and another proof finishing first do not change the
 statement. Never silently rebind to different input. Inapplicability is local
 IGNORE, not panic/REJECT; cache residency alone is not context identity.
@@ -149,48 +168,47 @@ interpreting the verdict:
 
 | Completion                      | Gossip outcome | Storage                                                        |
 | ------------------------------- | -------------- | -------------------------------------------------------------- |
-| Engine true                     | ACCEPT         | Store the first valid bare message for (B, T); never overwrite |
-| Engine false                    | REJECT         | None; retain Seen                                              |
-| Separately reported local fault | IGNORE         | None; retain Seen                                              |
+| Valid                           | ACCEPT         | Store the first valid bare message for (B, T); never overwrite |
+| Invalid                         | REJECT         | None; retain Seen                                              |
+| LocalFault                      | IGNORE         | None; retain Seen                                              |
 | Retired/inapplicable target     | IGNORE         | No insertion or resurrection                                   |
 
-If another valid attempt stores first, an admitted true still ACCEPTs without
-overwriting; an admitted false still REJECTs. Only **new admissions** IGNORE
+If another valid attempt stores first, an admitted Valid still ACCEPTs without
+overwriting; an admitted Invalid still REJECTs. Only **new admissions** IGNORE
 occupied storage. Proof bytes are not canonical. Protected input/result
 provenance permits one off-mutator engine call instead of repeat verification
 on apply.
 
-### Retirement is shared by admission, storage and Seen
+### Logical retirement is enforced; physical cleanup is deferred
 
-Keep precisely the latest finalized anchor and roots in
-`unfinalized_locations`. During finalization pruning, after updating that
-domain and removing orphans, apply it to `execution_proofs`,
-`execution_proof_roots` and `execution_proof_provers` together. Independent
-Seen eviction could reopen duplicate admission while work still runs.
-Keeping verified proofs after their target blocks are retired would retain
-history this pipeline no longer uses.
+Admission/completion authorize only the latest finalized anchor and roots in
+`unfinalized_locations`. Older finalized ancestors and discarded branches,
+including recent-slot orphans, cannot authorize work. Historical chain-link
+access or stale resident bookkeeping cannot readmit them or permit late storage.
+Retirement follows block identity, not an epoch-wide slot cutoff.
 
-Remove older finalized ancestors and discarded branches, including recent-slot
-orphans. Retirement follows block identity, not an epoch-wide slot cutoff.
+PR2 does not physically prune proof contexts, verified proofs or either Seen
+collection. A later cleanup must respect their common retained domain;
+independent Seen eviction could reopen duplicate admission. No retained-domain
+memory bound follows from logical retirement.
 
-Admission/completion use the same domain, so historical chain-link access
-cannot readmit retired targets and late results cannot recreate pruned records.
 The local retirement IGNORE must not preempt early empty/type REJECTs.
-A skipped epoch-boundary slot may leave the retained anchor without a cached
-full payload envelope; unavailable context is IGNORE, not substitution.
+A skipped-boundary anchor may remain applicable to prepared work after payload
+bytes disappear; fresh preparation still requires those bytes.
 
 ### Non-blocking orchestration preserves the authority boundary
 
 Preparation sends its result and exits; admission schedules another worker,
 rather than occupying shared workers waiting for mutator replies. Handoffs
 preserve provenance and origin; snapshots published after admission and
-storage/pruning avoid redundant work but do not replace live checks.
+storage avoid redundant work but do not replace live checks.
 
-Keep `ProofVerifier::verify_execution_proof(ExecutionProof) -> bool`, using
-`hash_tree_root(public_input)`. The null-engine guard returns IGNORE **before**
-preparation/admission: disabled is not invalid. Enabled true/false are proof
-verdicts; separately reported context/scheduling faults are local IGNORE,
-never generic peer REJECT. No backend error/cancellation API is added.
+The current engine boundary is
+`ProofEngine::verify_execution_proof(ExecutionProof) -> ProofVerdict`. PR3 must
+map Valid/Invalid/Undetermined exhaustively to Store Valid/Invalid/LocalFault;
+Undetermined is never peer REJECT. Context/scheduling faults are also local.
+The null-engine guard returns IGNORE **before** preparation/admission: disabled
+is not invalid. Store does not depend on or call the engine.
 
 Transfer origin ownership between stages for one normal-path terminal gossip/
 API result. Declines finish without engine work. Scheduling failure after
@@ -217,28 +235,30 @@ Cheap prechecks avoid unnecessary proof hashing/BLS; live admission prevents
 duplicate engine calls, not duplicated pre-admission BLS or unlimited distinct
 attempts. Invalid/withheld proofs cannot change payload status, beacon state
 or fork-choice weights. No durable Seen/restart or abrupt-stop recovery is
-promised; retained-domain pruning is not a hard memory cap during non-finality.
+promised; logical retirement is not physical reclamation or a memory cap.
 
 Finite queued-byte/work and concurrency limits are prerequisites for live
 ingress. Low priority is not isolation or DDoS protection. Preparation includes
 O(proof bytes) hashing plus BLS/replay/binding; engine cost is backend-specific.
-Map checks are expected-average O(1), subject to copy-on-write costs; pruning
-scans bookkeeping. Existing logs/metrics should distinguish stage outcomes,
-duplicates, local faults, pruning and queue/engine latency without proof data
-or high-cardinality labels.
+Map checks are expected-average O(1), subject to copy-on-write and destruction
+costs, not a constant-latency guarantee. Integration observability should
+distinguish duplicates, local faults and queue/engine latency without proof
+data or high-cardinality labels.
 
 ## Implementation and testing
 
 | PR                                                                | Responsibility                                                                                                       | Required evidence                                                                                                           |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | PR1 ([#17](https://github.com/eip8025-grandine/grandine/pull/17)) | Authentication/binding helpers, ordered preparation, trusted context and protected prepared provenance               | Precedence, signature/type/bounds, replay/cache safety, carrier consistency and unchanged proof bookkeeping                 |
-| PR2                                                               | Live applicability, paired permanent-Seen admission, admitted/completion provenance, first-valid storage and pruning | Atomic exclusion/no partial insertion, local-fault/invalid replay suppression, distinct verdicts, retention/no resurrection |
+| PR2 ([#25](https://github.com/eip8025-grandine/grandine/pull/25), [design 0010](0010-execution-proof-store-lifecycle.md)) | Accepted-context tracking, live applicability, paired permanent-Seen admission, protected handoff and first-valid storage | Atomic declines, context replacement, replay suppression, independent verdicts and logical retirement |
 | PR3                                                               | Messages, non-blocking workers, engine scheduling, snapshots, opt-out and terminal signalling                        | Controlled interleavings, actual engine-call counts, published bookkeeping and single terminal replies                      |
 
-Each PR builds/tests independently. PR1 has no lifecycle dependency; PR2 keeps
-admission/completion/pruning together; PR3 connects the full enforced lifecycle.
+PR1 is merged; PR2 implements admission/completion without service dispatch;
+PR3 connects the lifecycle. Physical cleanup remains separate. Final PR2
+post-rebase tests and strict lint confirmation are pending, not implied by
+source coverage.
 
-Boundary cases include early empty/type precedence; both-key races; true/true
+Boundary cases include early empty/type precedence; both-key races; Valid/Valid
 and mixed verdict orders; local faults; anchor/skipped-slot retention; recent
 orphans and late results. PR3 must prove actual engine-call exclusion and
 single replies with controlled interleavings; Store-only tests cannot.
@@ -257,9 +277,8 @@ workstreams.
 
 ## Open questions
 
-- The integration must demonstrate the sufficient cheap live-context predicate
-  from B's trusted acceptance/provenance; pointer equality, cache residency and
-  global snapshot generations are not substitutes.
-- Real-backend operational-failure semantics and measured resource budgets
-  require separate integration/exposure design; boolean false must not be
-  overloaded with local unavailability.
+- PR3 must demonstrate actual engine-call exclusion, snapshot publication order
+  and single terminal replies around the implemented Store transitions.
+- Live-exposure resource budgets, physical cleanup and independent binding
+  interoperability remain separate work; a three-way verdict alone does not
+  establish those guarantees.
