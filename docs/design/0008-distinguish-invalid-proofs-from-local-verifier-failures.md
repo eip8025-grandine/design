@@ -1,5 +1,5 @@
 ---
-status: Draft                # Draft | Accepted | Superseded
+status: Accepted             # Draft | Accepted | Superseded
 authors: [creese]
 workstream: verification     # gossip | verification | converged
 eip_repo: frisitano/EIPs
