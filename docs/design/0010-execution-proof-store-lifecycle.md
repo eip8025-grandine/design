@@ -7,8 +7,8 @@ eip_sha: 9207c6011f526bd40abd79649484a1a342585bd4
 consensus_specs_sha: 12c8b24bc09b12f62688d439ba20ef00b1fdfe1f
 ssz_specs_sha: b42af0a2265c25f5353cace185d066e8d39dbd6e
 grandine_upstream_sha: a63876249043020d8ebe3d410c5cf31b19be1cc2
-grandine_pr_base: c736de6f05b2bdecb3d166e3e396dc6ab91d2e1f
-grandine_stack_tip: e014f0fbed46046c5dfdf0d9ac1078bdd366d406
+grandine_pr_base: 67195ede016e20f2febcf9ed1941da5898976b3d
+grandine_stack_tip: 87e5e8f8499532e98f834714c610029967bf11a0
 superseded_by:
 ---
 
@@ -16,13 +16,42 @@ superseded_by:
 
 ## Context
 
+**PR25 completion-policy amendment:** after retention and full-context
+applicability, occupied `(B, T)` storage gates every report (Valid, Invalid, or
+LocalFault) to
+`ExecutionProofCompletionOutcome::Discarded(ExecutionProofDiscard::AlreadyVerified)`.
+This is local IGNORE, does not change storage or Seen, and uses the existing
+`Discarded` result rather than a new top-level completion outcome. It is distinct
+from the unchanged `ExecutionProofAdmissionDecline::AlreadyVerified`, which
+continues to decline a new admission without Seen writes. If storage is vacant,
+Valid stores and ACCEPTs, Invalid REJECTs, and LocalFault locally IGNOREs. This
+supersedes the earlier policy that interpreted Invalid/LocalFault after a Valid
+had stored. The local Grandine source baseline is `87e5e8f8499532e98f834714c610029967bf11a0`;
+the Store/test changes are present in that PR25 branch working tree, not
+committed at this baseline. This representation correction is awaiting fresh
+independent source review; the earlier Sol review covered the superseded
+completion-enum shape. Scoped formatting/whitespace checks pass. The current
+bounded locked/offline focused Store test stopped before compilation because the
+pinned `universal-precompiles` `sha2` Git source is unavailable offline; earlier
+check/strict-Clippy attempts on the prior representation hit the same resolver
+blocker and were not rerun for this correction. Exact commands and exit statuses are recorded in
+[`PR25-ALREADY-VERIFIED-AMENDMENT.md`](../../../scratchpad/execution-proof-pr2-master-update/PR25-ALREADY-VERIFIED-AMENDMENT.md);
+no executable test/check/lint pass is claimed. EIP/spec/SSZ target pins remain
+the selected historical targets below; this note makes no claim about current
+spec or remote PR state.
+
 This document covers **PR2: the Store lifecycle**
 ([Grandine #25](https://github.com/eip8025-grandine/grandine/pull/25)) within the
 [execution-proof validation pipeline](0004-execution-proof-gossip-validation-pipeline.md).
-PR1 ([#17](https://github.com/eip8025-grandine/grandine/pull/17)) is merged into
-the selected base and provides authenticated, payload-bound preparation.
+The selected local Grandine baseline includes PR1
+([#17](https://github.com/eip8025-grandine/grandine/pull/17)) and its
+authenticated, payload-bound preparation.
 PR2 adds live admission and completion; PR3 will connect them to engine
-workers and terminal gossip/API replies. PR2 does not enable live proof processing.
+workers and terminal gossip/API replies. PR3 must map the existing
+`ExecutionProofCompletionOutcome::Discarded(_)` arm to terminal IGNORE, including
+`ExecutionProofDiscard::AlreadyVerified`; the separate
+`ExecutionProofAdmissionDecline::AlreadyVerified` remains a pre-engine decline.
+PR2 does not enable live proof processing or implement that PR3 mapping.
 
 The spec pins retain the selected progressive-list semantics and zkBoost
 binding conventions described in 0004, not a claim of alignment with latest
@@ -35,7 +64,8 @@ spec master. `grandine_upstream_sha` pins the underlying upstream merge-base;
 - Authorize verification only against applicable live payload context.
 - Record both duplicate keys atomically before engine work.
 - Preserve exact proof/context association through a consuming handoff.
-- Apply each eligible result independently and store only the first valid proof.
+- Apply an admitted report only while `(B,T)` is vacant; once storage is occupied,
+  ignore every later report and preserve the first valid proof.
 - Prevent stale work from reviving retired targets without changing consensus behavior.
 
 **Non-goals**
@@ -80,7 +110,7 @@ Invalid proofs, local faults and dispatch failures do not release these keys.
 Distinct attempts with different keys may overlap for the same block/type;
 there is no additional exclusive in-flight gate.
 
-### Completion checks applicability before the report
+### Completion checks applicability and occupancy before the report
 
 Only a report paired with the admitted input can complete. Store remains
 independent of the proof-engine crate; PR3 must map engine `Valid`, `Invalid`
@@ -89,15 +119,24 @@ and `Undetermined` exhaustively to Store `Valid`, `Invalid` and `LocalFault`.
 | Live completion | Result | Verified storage |
 | --- | --- | --- |
 | Retired or changed context, regardless of report | Discard locally | No insertion |
-| Applicable Valid | Accept | Store the first bare envelope for block/type; never replace |
-| Applicable Invalid | Reject | Unchanged |
-| Applicable LocalFault | Local outcome, not peer rejection | Unchanged |
+| Applicable report, occupied block/type | Ignore (`Discarded(AlreadyVerified)`) | Preserve the first bare envelope |
+| Applicable Valid, vacant block/type | Accept | Store the first bare envelope |
+| Applicable Invalid, vacant block/type | Reject | Unchanged |
+| Applicable LocalFault, vacant block/type | Local outcome, not peer rejection | Unchanged |
 
-An already-admitted applicable Valid still accepts if another attempt stored
-first; an Invalid still rejects. Occupancy suppresses new admissions, not
-independent reports. No completion rolls back Seen or changes payload status,
-beacon state or fork-choice weights. Historical resident entries cannot
-authorize retired targets; physical reclamation is deferred.
+After retention and full-Q applicability, completion checks verified storage
+before reading/interpreting its report. If `(B, T)` is occupied, every report
+returns `ExecutionProofCompletionOutcome::Discarded(ExecutionProofDiscard::AlreadyVerified)`
+/ IGNORE; no bytes or `Arc` are replaced and neither attempt's Seen bookkeeping
+is rolled back. This discard means the completion is no longer needed, unlike
+`Retired` or `ContextInapplicable`, which mean it is no longer applicable. New
+admissions independently return the unchanged
+`ExecutionProofAdmissionDecline::AlreadyVerified` without Seen writes. If vacant,
+Valid stores and ACCEPTs, Invalid REJECTs, and LocalFault locally IGNOREs. Thus
+an Invalid result is rejected only when no valid proof has already occupied the
+pair. No completion changes payload status, beacon state or fork-choice weights.
+Historical resident entries cannot authorize retired targets; physical
+reclamation is deferred.
 
 ## Trade-offs and alternatives
 
@@ -113,8 +152,9 @@ authorize retired targets; physical reclamation is deferred.
   that report without coupling Store's vocabulary to the engine. Missing context
   has separate preparation/discard outcomes. `LocalFault` implies neither peer
   invalidity nor retry eligibility: admitted Seen keys remain consumed.
-- **First-valid storage rather than canonical proof selection:** preserves
-  existing evidence without erasing another admitted attempt's result.
+- **First-valid storage rather than canonical proof selection:** the first live
+  Valid completion chooses stored bytes; later admitted reports are ignored once
+  occupied, so no result overwrites that evidence. Proof bytes are not canonical.
 - **Best-effort context capture rather than coupled payload acceptance:** proof
   bookkeeping cannot break ordinary acceptance, but capture has synchronous cost
   and a failed capture leaves no applicable proof context.

@@ -7,14 +7,38 @@ eip_sha: 9207c6011f526bd40abd79649484a1a342585bd4
 consensus_specs_sha: 12c8b24bc09b12f62688d439ba20ef00b1fdfe1f
 ssz_specs_sha: b42af0a2265c25f5353cace185d066e8d39dbd6e
 grandine_upstream_sha: a63876249043020d8ebe3d410c5cf31b19be1cc2
-grandine_pr_base: c736de6f05b2bdecb3d166e3e396dc6ab91d2e1f
-grandine_stack_tip: e014f0fbed46046c5dfdf0d9ac1078bdd366d406
+grandine_pr_base: 67195ede016e20f2febcf9ed1941da5898976b3d
+grandine_stack_tip: 87e5e8f8499532e98f834714c610029967bf11a0
 superseded_by:
 ---
 
 # 0004 — Execution-proof gossip validation pipeline
 
 ## Context
+
+**PR25 completion-policy amendment:** after retention and full-context
+applicability, occupied `(B, T)` storage gates every report (Valid, Invalid, or
+LocalFault) to
+`ExecutionProofCompletionOutcome::Discarded(ExecutionProofDiscard::AlreadyVerified)`.
+This is local IGNORE, does not change storage or Seen, and uses the existing
+`Discarded` result rather than a new top-level completion outcome. It is distinct
+from the unchanged `ExecutionProofAdmissionDecline::AlreadyVerified`, which
+continues to decline a new admission without Seen writes. If storage is vacant,
+Valid stores and ACCEPTs, Invalid REJECTs, and LocalFault locally IGNOREs. This
+supersedes the earlier policy that interpreted Invalid/LocalFault after a Valid
+had stored. The local Grandine source baseline is `87e5e8f8499532e98f834714c610029967bf11a0`;
+the Store/test changes are present in that PR25 branch working tree, not
+committed at this baseline. This representation correction is awaiting fresh
+independent source review; the earlier Sol review covered the superseded
+completion-enum shape. Scoped formatting/whitespace checks pass. The current
+bounded locked/offline focused Store test stopped before compilation because the
+pinned `universal-precompiles` `sha2` Git source is unavailable offline; earlier
+check/strict-Clippy attempts on the prior representation hit the same resolver
+blocker and were not rerun for this correction. Exact commands and exit statuses are recorded in
+[`PR25-ALREADY-VERIFIED-AMENDMENT.md`](../../../scratchpad/execution-proof-pr2-master-update/PR25-ALREADY-VERIFIED-AMENDMENT.md);
+no executable test/check/lint pass is claimed. EIP/spec/SSZ target pins remain
+the selected historical targets below; this note makes no claim about current
+spec or remote PR state.
 
 Execution proofs are supplementary, non-consensus artifacts. This design
 covers their authentication, binding to accepted payloads, verification and
@@ -35,12 +59,14 @@ selected progressive-list limit semantics.
 its underlying `upstream/develop` merge-base; `grandine_pr_base` pins PR2's base.
 `ssz_specs_sha` pins the selected progressive-list semantics, not latest master.
 
-**Status:** PR1 ([#17](https://github.com/eip8025-grandine/grandine/pull/17))
-is merged into the selected base. PR2
-([#25](https://github.com/eip8025-grandine/grandine/pull/25)) implements the Store
-lifecycle described in [0010](0010-execution-proof-store-lifecycle.md); final verification/review
-remain pending. PR3 service wiring is not implemented. Physical pruning is a
-separate follow-up.
+**Implementation status at the pinned local baseline:** the selected Grandine
+source includes PR1's preparation changes. PR2's Store lifecycle is described
+in [0010](0010-execution-proof-store-lifecycle.md); this amendment updates its
+completion gate in an uncommitted working tree. Its affected Cargo checks stop
+before compilation on the unavailable offline `sha2` source, as recorded above.
+PR3 service wiring is future work, not implemented by this Store amendment.
+Physical pruning is separate. This is not a statement of current remote PR or
+spec status.
 
 ## Goals and non-goals
 
@@ -156,7 +182,7 @@ equivalent allocations and another proof finishing first do not change the
 statement. Never silently rebind to different input. Inapplicability is local
 IGNORE, not panic/REJECT; cache residency alone is not context identity.
 
-### Completion separates attempt verdicts from verified storage
+### Completion gates reports on verified storage
 
 Completion accepts only a verdict tied to the exact admitted engine input,
 never an arbitrary envelope plus a claimed verification result.
@@ -168,16 +194,25 @@ interpreting the verdict:
 
 | Completion                      | Gossip outcome | Storage                                                        |
 | ------------------------------- | -------------- | -------------------------------------------------------------- |
-| Valid                           | ACCEPT         | Store the first valid bare message for (B, T); never overwrite |
-| Invalid                         | REJECT         | None; retain Seen                                              |
-| LocalFault                      | IGNORE         | None; retain Seen                                              |
-| Retired/inapplicable target     | IGNORE         | No insertion or resurrection                                   |
+| Retired/inapplicable target        | IGNORE                        | No insertion or resurrection; checked first |
+| Applicable report, occupied (B, T) | IGNORE (`Discarded(AlreadyVerified)`) | Preserve the existing envelope; no Seen rollback |
+| Valid, vacant (B, T)              | ACCEPT                        | Store the first valid bare message for (B, T) |
+| Invalid, vacant (B, T)            | REJECT                        | None; retain Seen |
+| LocalFault, vacant (B, T)          | IGNORE                        | None; retain Seen |
 
-If another valid attempt stores first, an admitted Valid still ACCEPTs without
-overwriting; an admitted Invalid still REJECTs. Only **new admissions** IGNORE
-occupied storage. Proof bytes are not canonical. Protected input/result
-provenance permits one off-mutator engine call instead of repeat verification
-on apply.
+After retention and full-context applicability, Store checks whether `(B, T)`
+is already occupied **before reading the report**. If so, Valid, Invalid, and
+LocalFault all return
+`ExecutionProofCompletionOutcome::Discarded(ExecutionProofDiscard::AlreadyVerified)`
+(terminal IGNORE) without overwriting the stored bare envelope or rolling back
+either admitted Seen key. `ExecutionProofDiscard::AlreadyVerified` means the
+completion is no longer needed; `Retired` and `ContextInapplicable` mean it is
+no longer applicable. New admissions still use the separate, unchanged
+`ExecutionProofAdmissionDecline::AlreadyVerified` decline without adding Seen
+keys. If storage is vacant, Valid stores the first bare envelope and ACCEPTs,
+Invalid REJECTs, and LocalFault locally IGNOREs. Proof bytes are not canonical.
+Protected input/result provenance permits one off-mutator engine call instead
+of repeat verification on apply.
 
 ### Logical retirement is enforced; physical cleanup is deferred
 
@@ -206,9 +241,13 @@ storage avoid redundant work but do not replace live checks.
 The current engine boundary is
 `ProofEngine::verify_execution_proof(ExecutionProof) -> ProofVerdict`. PR3 must
 map Valid/Invalid/Undetermined exhaustively to Store Valid/Invalid/LocalFault;
-Undetermined is never peer REJECT. Context/scheduling faults are also local.
-The null-engine guard returns IGNORE **before** preparation/admission: disabled
-is not invalid. Store does not depend on or call the engine.
+Undetermined is never peer REJECT. PR3 maps the existing Store
+`Discarded` completion arm (including `ExecutionProofDiscard::AlreadyVerified`)
+to terminal IGNORE; no special top-level completion outcome is needed.
+Context/scheduling faults are also local. The null-engine guard returns IGNORE
+**before** preparation/admission: disabled is not invalid. Store does not depend
+on or call the engine. The PR25 amendment changes no PR3 messages, tasks, Control
+mapping or proof-engine code.
 
 Transfer origin ownership between stages for one normal-path terminal gossip/
 API result. Declines finish without engine work. Scheduling failure after
@@ -250,13 +289,16 @@ data or high-cardinality labels.
 | PR                                                                | Responsibility                                                                                                       | Required evidence                                                                                                           |
 | ----------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | PR1 ([#17](https://github.com/eip8025-grandine/grandine/pull/17)) | Authentication/binding helpers, ordered preparation, trusted context and protected prepared provenance               | Precedence, signature/type/bounds, replay/cache safety, carrier consistency and unchanged proof bookkeeping                 |
-| PR2 ([#25](https://github.com/eip8025-grandine/grandine/pull/25), [design 0010](0010-execution-proof-store-lifecycle.md)) | Accepted-context tracking, live applicability, paired permanent-Seen admission, protected handoff and first-valid storage | Atomic declines, context replacement, replay suppression, independent verdicts and logical retirement |
+| PR2 ([#25](https://github.com/eip8025-grandine/grandine/pull/25), [design 0010](0010-execution-proof-store-lifecycle.md)) | Accepted-context tracking, live applicability, paired permanent-Seen admission, protected handoff and first-valid storage | Atomic declines, context replacement, replay suppression, occupancy/verdict precedence and logical retirement |
 | PR3                                                               | Messages, non-blocking workers, engine scheduling, snapshots, opt-out and terminal signalling                        | Controlled interleavings, actual engine-call counts, published bookkeeping and single terminal replies                      |
 
-PR1 is merged; PR2 implements admission/completion without service dispatch;
-PR3 connects the lifecycle. Physical cleanup remains separate. Final PR2
-post-rebase tests and strict lint confirmation are pending, not implied by
-source coverage.
+The pinned local implementation baseline contains PR1; PR2 implements
+admission/completion without service dispatch; PR3 connects the lifecycle.
+Physical cleanup remains separate. The current bounded PR25 focused Store test
+was blocked before compilation by the offline dependency source noted above;
+check/strict-lint attempts predate this representation correction and were not
+rerun. No current-source runtime, compile, or lint success is implied by source
+coverage.
 
 Boundary cases include early empty/type precedence; both-key races; Valid/Valid
 and mixed verdict orders; local faults; anchor/skipped-slot retention; recent
