@@ -203,9 +203,11 @@ flag. In `build_local_node`, before `Arc::new(network_config)` and
 `Network::new`, one line sets `network_config.enable_execution_proof`
 from that predicate. The field exists only after the submodule bump
 that N1 carries, so N1 adds this line, together with routing in `p2p`.
-R1's obligation is limited to making `proof_engine` available at that
-point. As 0009 notes, the same flag controls the core topic, the
-whitelist and the topic-count limit.
+N1 reads the engine the runtime passes to `Controller::new`: P1's
+`NullProofEngine` until R1 lands, R1's engine after. R1 and N1 can
+merge in either order; whichever lands second reconciles the shared
+lines in `build_local_node`. As 0009 notes, the same flag controls the
+core topic, the whitelist and the topic-count limit.
 
 **Feature.** The `grandine` crate gets `execution-proof-sp1 =
 ['runtime/execution-proof-sp1']`. The `runtime` crate gets
