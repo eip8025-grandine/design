@@ -375,20 +375,25 @@ helper):
 - `--network mainnet 1=mock` is a startup error, `MockOnMainnet` from
   construction.
 - In construction under `Config::mainnet()`, `1=mock` gives
-  `MockOnMainnet`. `1=mock 1=mock` gives `DuplicateProofType`. With the
-  feature, `0x01` followed by 31 zero bytes gives
-  `InvalidVerifyingKey`, and the ethrex v26 VK
+  `MockOnMainnet`. Under `Config::sepolia()`, `1=mock 1=mock` gives
+  `DuplicateProofType`, and `--network sepolia` with the same pair is
+  a startup error. Under `Config::mainnet()`, the mock check rejects
+  the first entry before the duplicate is seen, so that pair gives
+  `MockOnMainnet` instead. With the feature, `0x01` followed by 31
+  zero bytes gives `InvalidVerifyingKey`, and the ethrex v26 VK
   (`00662ca6…c88b`) succeeds.
 
 **Run.**
 
 - The `runtime` tests, with and without `runtime/execution-proof-sp1`.
-- `cargo build --release --bin grandine --features default-networks`
-  (acceptance 5, without SP1).
-- `cargo build --release --bin grandine --features
-  default-networks,execution-proof-sp1` (with SP1). On a cold cache,
-  ere's `build.rs` needs the network (0007). CI gains this build next
-  to its `proof_engine/sp1` test step.
+- `cargo build --release -p grandine --bin grandine --features
+  default-networks` (acceptance 5, without SP1).
+- `cargo build --release -p grandine --bin grandine --features
+  default-networks,execution-proof-sp1` (with SP1). `-p grandine` is
+  required: without it, Cargo also builds other workspace crates, which
+  enable conflicting BLS backends. On a cold cache, ere's `build.rs`
+  needs the network (0007). CI gains this build next to its
+  `proof_engine/sp1` test step.
 - `scripts/ci/clippy.bash --deny warnings`, also with the feature, and
   `cargo fmt -- --check`.
 
