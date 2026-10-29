@@ -287,8 +287,8 @@ depends on the P1 Controller parameter landing first.
 The VKs and backend choices are trust roots (0007). A wrong VK makes
 honest proofs `Invalid` (0008). R1's objective is that a
 misconfiguration produces a startup error rather than a change in
-runtime behaviour. Nothing R1 adds is reachable by peers. R1 only decides whether the gossip surface of
-0004 and 0009 exists.
+runtime behaviour. Nothing R1 adds is reachable by peers. R1 only
+decides whether the gossip surface of 0004 and 0009 exists.
 
 **DoS and resource use.**
 
