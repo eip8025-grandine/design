@@ -81,10 +81,12 @@ defines one global topic, and `get_supported_proof_types()` is
    with `PublicValuesMismatch` and does not forward it.
 3. One command builds the image, starts the enclave, runs the steps and
    exits 0 (pass), 1 (a condition is contradicted) or 2 (inconclusive:
-   setup or timeout). The exit code is never 0 unless every condition
-   was observed.
-4. A run completes within one epoch of selecting B, so B stays
-   unfinalized and retained (0004's retirement rule).
+   setup, timeout or a change to B's eligibility). The exit code is
+   never 0 unless every condition was observed.
+4. B stays eligible for every step: retained under 0004's retirement
+   rule, with its accepted payload context unchanged. A step that runs
+   after B's eligibility changes is inconclusive, never a pass or a
+   failure.
 5. Every run leaves an evidence bundle that is enough to re-check the
    verdict without the enclave.
 6. The publisher builds against L1 alone, before P1, R1 and N1 merge.
@@ -178,15 +180,76 @@ for messages it receives, so none re-forwards.
 **Target and keys.** The publisher loads the enclave's network config
 (`config.yaml` from the genesis artifact) and refuses any
 `DEPOSIT_CHAIN_ID` that belongs to one of Grandine's predefined
-networks. B is the most recent block that is at least one slot old,
-whose envelope is returned by
+networks. B is the most recent canonical block in the current epoch
+that is at least one slot old, and whose envelope is returned by
 `/eth/v1/beacon/execution_payload_envelopes/{B}` with
-`execution_optimistic: false`, and that is not finalized. Keys come
-from the Grandine participant's keystore artifact, fetched with
-`kurtosis files download` and decrypted with `eip_2335`. The publisher
-selects four distinct active validators, V1–V4, and maps them to
-indices through the beacon API. Execution-proof signatures are not
-slashable, so using validator keys that are also attesting is safe.
+`execution_optimistic: false`. Candidates come from the by-slot lookup
+used for the eligibility check below, so B is canonical by
+construction. If no such block exists yet, the publisher waits for
+one. Keys come from the Grandine participant's keystore artifact,
+fetched with `kurtosis files download` and decrypted with `eip_2335`.
+The publisher selects four distinct active validators, V1–V4, and maps
+them to indices through the beacon API. Execution-proof signatures are
+not slashable, so using validator keys that are also attesting is
+safe.
+
+**B's eligibility.** At the pin, the spec sets no time or finality
+bound on a proof's block. It requires only that B is in `store.blocks`
+and `store.payloads`, and the spec Store never prunes. Retention is
+Grandine's rule. 0004 and 0010 authorize work only for the latest
+finalized anchor or a root in `unfinalized_locations`, and only while
+B's captured payload context still matches. Otherwise admission
+declines, or completion discards, with `Retired` or
+`ContextInapplicable`, and both are IGNORE. The Store removes roots
+from `unfinalized_locations` when finalization passes them or prunes
+their branch (`move_to_finalized` and `prune_orphans` in
+`fork_choice_store/src/store.rs`). Retirement follows block identity,
+not elapsed time. Run length alone does not bound it: a B just above
+the finalized checkpoint retires at the next epoch boundary, and an
+orphaned B retires as soon as finality passes its fork point.
+
+Selection gives a margin. Under the phase0 rules that Gloas inherits,
+justification processing at the end of epoch e finalizes at most
+epoch e−1, and the Store pulls that up only when the next epoch starts
+(`weigh_justification_and_finalization`, `on_tick_per_slot`). During
+epoch t, therefore, the finalized epoch is at most t−2. A canonical B
+selected in epoch c stays unfinalized through epoch c+1, and a run
+sized to finish within one epoch fits inside that window. The margin
+is not what the verdict rests on. Two checks are:
+
+- **Grandine's reason.** An outcome with reason `Retired` or
+  `ContextInapplicable` makes the step inconclusive. The stage that
+  reported it does not matter. The run stops before the next step is
+  published.
+- **The beacon API.** Before each publish and after each window, the
+  publisher requests `/eth/v1/beacon/headers?slot={slot(B)}`. The
+  check passes only if the returned root is B and the response
+  reports `finalized: false`. Otherwise the step is inconclusive and
+  the run stops. A retired root is never readmitted, so a check that
+  passes after the window also covers the moment the outcome was
+  logged, provided the API's view has caught up by then.
+
+**What the API check can rely on.** Grandine resolves a slot by
+walking back from the head of one Store snapshot (`block_root_by_slot`
+in `fork_choice_control/src/queries.rs`, `canonical_chain_segments` in
+`fork_choice_store/src/store.rs`). It returns that chain's block at the
+slot, or 404 if the slot is empty there, and never another branch's
+block. A match therefore means B is canonical in that snapshot. On the
+canonical chain, the slot-based `finalized` flag is the same as B's
+own finality. Together the two imply that B is in
+`unfinalized_locations`. The check is conservative: a reorg can make
+it fail while B is still retained, and the step is then inconclusive,
+not misleading. Two fields cannot be used:
+
+- `canonical` is the constant `true` in both header endpoints
+  (`http_api/src/standard.rs`). The check compares roots instead.
+- The by-root header's `finalized` falls back to the database's
+  unfinalized blocks (`stored_block_by_root`). It reports `false` for a
+  block the Store has already pruned, so the check never reads it.
+
+The reason check is the one that rules out a false pass. Without it,
+a retired B would IGNORE steps 2–4, O would receive nothing, and step
+2 would look like evidence of storage.
 
 **Messages.** Every envelope targets B and is signed with
 `helper_functions`' `ExecutionProofEnvelope` signing, the same code
@@ -207,14 +270,14 @@ Grandine verifies with.
 **Steps and pass conditions.** The steps run in order. Each step waits
 for O to receive the message, or for a window W (default 2 slots).
 Grandine's outcome must be logged at least 6 s before W ends, so a
-forward would have reached O. A missing outcome makes the run
-inconclusive, not a failure.
+forward would have reached O. A missing outcome, or a change to B's
+eligibility (above), makes the run inconclusive, not a failure.
 
 | Step | Sender, validator | Message | Grandine evidence | At O | Why |
 | --- | --- | --- | --- | --- | --- |
 | 0 | all | none | R1's startup lines: type 1 `mock`, type 2 `sp1` with VK `0x00662ca6…c88b`. Grandine subscribed to the topic, as seen by all four identities, and in O's mesh for it. | — | Without it, "O received nothing" proves nothing |
 | 1 | P_a, V1 | type 1 mock for B | ACCEPT for (B, 1, V1) | Receives it from Grandine, byte-identical | Goal 1 |
-| 2 | P_a, V2 | type 1 mock for B, different `proof` bytes | IGNORE, verified proof already known for (B, 1) | Nothing | Shows step 1 was stored, the only external evidence of storage |
+| 2 | P_a, V2 | type 1 mock for B, different `proof` bytes | IGNORE with reason `AlreadyVerified`; any other IGNORE reason does not pass | Nothing | Shows step 1 was stored, the only external evidence of storage |
 | 3 | P_b, V3 | type 2 fixture | REJECT for (B, 2, V3); engine line `verdict: Invalid`, `committed public values do not match the public input`, `proof_type: 2` | Nothing | Goal 2 |
 | 4 | P_c, V4 | type 2 fixture, one byte flipped | REJECT for (B, 2, V4); engine line `proof failed verification`, `proof_type: 2` | Nothing | Shows the running verifier discriminates, so step 3's verification is not vacuous |
 
@@ -233,7 +296,12 @@ publisher. Grandine's side comes from its log:
   the type inside the step's window;
 - one terminal-outcome line per message, owned by P1. It names the
   block root, type, validator index, outcome and, for an IGNORE or
-  REJECT, the reason. This line does not exist yet (*Open questions*).
+  REJECT, the reason. The reason must distinguish `AlreadyVerified`
+  from `Retired` and `ContextInapplicable`. The evaluator does not need
+  the processing stage. Step 2 is published only after step 1 reached
+  O, so its `AlreadyVerified` shows (B, 1) was stored, whichever stage
+  reports it. A retired or inapplicable B is inconclusive at either
+  stage. This line does not exist yet (*Open questions*).
 
 T1 adds no code to `p2p`, `fork_choice_*`, `runtime` or
 `proof_engine`.
@@ -243,7 +311,8 @@ and the Grandine and `eth2_libp2p` commits, starts the enclave, and
 waits up to 10 minutes for Grandine to stop syncing with a Gloas head
 and a candidate B. `publisher run` writes a JSONL report of each
 publish (time, message ID, envelope root, B, type, validator) and each
-receipt or connection at O. The driver saves Grandine's
+receipt or connection at O, plus each B eligibility check and its
+result. The driver saves Grandine's
 `kurtosis service logs`, and `publisher evaluate` reads the report and
 log, prints the step table with each cell marked pass, fail or
 inconclusive, and sets the exit code. The bundle (parameters,
@@ -289,6 +358,12 @@ self-consistent, not that the root is right.
 
 **One publishing identity**, as the roadmap sketched, makes steps 3
 and 4 depend on P1's penalty policy and score decay.
+
+**Rely on run length to keep B retained.** This does not hold for an
+old or orphaned B, and it would report a retirement as a step failure
+or, in step 2, as a pass. **Select a fresh B for each step**
+would shorten each step's exposure, but step 2 has to target step 1's
+B to observe storage. One B with per-step checks covers both cases.
 
 **A debug endpoint for storage** instead of step 2 would add API
 surface that only a test uses. Step 2 observes storage through
@@ -365,7 +440,13 @@ member and lock entries. None of it can be upstreamed, because
   clean run. It returns fail for a forward at O in steps 2–4, a wrong
   reason, or an outcome for the wrong (B, T, V). It returns
   inconclusive for a missing outcome, an outcome logged less than 6 s
-  before W ends, or a second peer at O.
+  before W ends, or a second peer at O. It also returns inconclusive
+  for a `Retired` or `ContextInapplicable` reason, or a failed
+  eligibility check, in any step, including step 2, where an IGNORE
+  for either reason never passes.
+- Target selection refuses a non-canonical B, a B from an earlier
+  epoch and an optimistic B. The eligibility check passes only on a
+  by-slot root match with `finalized: false`, and ignores `canonical`.
 - The chain-ID guard refuses every predefined network.
 
 **Devnet acceptance.** On a clean checkout with P1c, R1 and N1 merged,
@@ -377,10 +458,12 @@ a fresh enclave. Both bundles are attached to the PR. Also run
 
 **Before Accepted**
 
-- The terminal-outcome log line: its target, level and fields. The
-  publisher's evaluator depends on it, and P1 owns it. It needs
-  agreement with the P1 owner. N1's subscription log is not needed,
-  because step 0 observes subscription on the wire.
+- The terminal-outcome log line: whether and when P1 provides it,
+  and its format (target, level and fields). The publisher's evaluator
+  depends on it, and P1 owns it. It needs agreement with the P1 owner,
+  including reason values that tell `AlreadyVerified` apart from
+  `Retired` and `ContextInapplicable`. N1's subscription log is not
+  needed, because step 0 observes subscription on the wire.
 
 **Settled in the implementation PR**
 
