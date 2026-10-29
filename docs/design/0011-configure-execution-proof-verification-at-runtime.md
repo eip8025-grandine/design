@@ -54,10 +54,10 @@ divides the remaining integration work into three milestones:
   on none of the P1 or N1 responsibilities.
 
 P1 and N1 are owned by the other workstream. Neither consumer
-interface is specified yet: 0010 at `43d05db1` covers only the Store
-lifecycle. This design therefore proposes both interfaces (see
-*Hand-off to P1* and *Hand-off to N1*). They need agreement from the
-P1 and N1 owners before acceptance (*Open questions*).
+interface is in a published design: 0010 at `43d05db1` covers only the
+Store lifecycle. Both interfaces have been agreed with the P1 and N1
+owner, and this design records them (*Hand-off to P1* and *Hand-off to
+N1*).
 
 **Spec.** In
 [`p2p-interface.md`](https://github.com/ethereum/consensus-specs/blob/b834fa8411cb2152563e8835c5b72c28f7503e7a/specs/_features/eip8025/p2p-interface.md),
@@ -190,18 +190,16 @@ guest the node trusts. The engine already logs a `warn!` for each mock
 type. Without the option, nothing is logged and behaviour is
 unchanged.
 
-**Hand-off to P1.** R1 passes the engine to the Controller as one
-`Arc<dyn ProofEngine>`, named `proof_engine` per 0006's guidance. In
-the roadmap, the P1 Controller PR adds this parameter to
-`Controller::new`, and the runtime first supplies `NullProofEngine`.
-R1 then supplies the constructed engine instead. If P1 adopts a
-different shape, such as a setter or a field on another config struct,
-R1 supplies the same value through it. R1 does not change the
-pipeline, the task or the null guard.
+**Hand-off to P1.** As agreed with the P1 owner, `Controller::new`
+takes a required `Arc<dyn ProofEngine>`, not an `Option`, named
+`proof_engine` per 0006's guidance. In the roadmap, the P1 Controller
+PR adds this parameter, and the runtime first supplies
+`NullProofEngine`. R1 then supplies the constructed engine instead.
+R1 does not change the pipeline, the task or the null guard.
 
-**Hand-off to N1.** "Verification enabled" means
-`!proof_engine.is_null()`, and R1 defines no other flag. In
-`build_local_node`, before `Arc::new(network_config)` and
+**Hand-off to N1.** As agreed with the N1 owner, "verification
+enabled" means `!proof_engine.is_null()`, and R1 defines no other
+flag. In `build_local_node`, before `Arc::new(network_config)` and
 `Network::new`, one line sets `network_config.enable_execution_proof`
 from that predicate. The field exists only after the submodule bump
 that N1 carries, so N1 adds this line, together with routing in `p2p`.
@@ -401,16 +399,11 @@ cover configuration.
 
 **Before Accepted**
 
-- **P1 and N1 interfaces.** The P1 and N1 owners need to agree on two
-  points:
-  - the shape of the P1 `Controller::new` parameter;
-  - N1 setting `enable_execution_proof` from `!proof_engine.is_null()`
-    in `build_local_node`.
-
-  If the P1 Controller PR is delayed, it must also be decided whether
-  R1 introduces the parameter itself, with existing callers passing
-  `NullProofEngine`. The alternative would be landing an option that
-  has no effect.
+- **Delayed P1 Controller PR.** If the P1 Controller PR is delayed, it
+  must be decided whether R1 introduces the agreed
+  `Arc<dyn ProofEngine>` parameter itself, with existing callers
+  passing `NullProofEngine`. The alternative would be landing an
+  option that has no effect.
 
 **Deferred**
 
