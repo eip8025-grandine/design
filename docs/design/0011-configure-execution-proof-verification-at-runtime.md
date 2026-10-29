@@ -192,10 +192,10 @@ unchanged.
 
 **Hand-off to P1.** As agreed with the P1 owner, `Controller::new`
 takes a required `Arc<dyn ProofEngine>`, not an `Option`, named
-`proof_engine` per 0006's guidance. In the roadmap, the P1 Controller
-PR adds this parameter, and the runtime first supplies
-`NullProofEngine`. R1 then supplies the constructed engine instead.
-R1 does not change the pipeline, the task or the null guard.
+`proof_engine` per 0006's guidance. P1 owns adding this parameter and
+wiring it into the pipeline. Its Controller PR has the runtime supply
+`NullProofEngine` at first, and R1 then supplies the constructed engine
+instead. R1 does not change the pipeline, the task or the null guard.
 
 **Hand-off to N1.** As agreed with the N1 owner, "verification
 enabled" means `!proof_engine.is_null()`, and R1 defines no other
@@ -349,7 +349,8 @@ startup, plus 0007's mock `warn!`. Metrics are deferred.
 
 ## Implementation and testing
 
-One PR against `feature/eip8025`, after P1's Controller PR. It touches
+One PR against `feature/eip8025`, after P1's Controller PR. If that PR
+is delayed, R1 waits; it does not add the parameter itself. It touches
 `grandine/Cargo.toml`, `runtime/Cargo.toml` and
 `runtime/src/{grandine_args,grandine_config,runtime}.rs`. Parsing and
 construction go in a small `runtime` module. None of it can be
@@ -397,13 +398,7 @@ cover configuration.
 
 ## Open questions
 
-**Before Accepted**
-
-- **Delayed P1 Controller PR.** If the P1 Controller PR is delayed, it
-  must be decided whether R1 introduces the agreed
-  `Arc<dyn ProofEngine>` parameter itself, with existing callers
-  passing `NullProofEngine`. The alternative would be landing an
-  option that has no effect.
+**Before Accepted:** none.
 
 **Deferred**
 
