@@ -27,7 +27,7 @@ uses `!proof_engine.is_null()` at lines 185 and 1068. Runtime supplies a
 
 The worker/mutator pipeline returns typed `P2pMessage::Accept`, `Ignore` and
 `Reject` outcomes. `p2p/src/network.rs:486` handles these replies;
-`report_outcome` at line 3137 forwards them to gossipsub. Authentication,
+`report_outcome` at line 3155 forwards them to gossipsub. Authentication,
 admission and outcome policy remain those of the
 [validation pipeline](0004-execution-proof-gossip-validation-pipeline.md) and
 [Store lifecycle](0010-execution-proof-store-lifecycle.md).
@@ -82,23 +82,23 @@ Restore the upstream URL once it serves the fork revision.
 
 ### 2. Hoist engine ownership in runtime
 
-`runtime/src/runtime.rs` imports `NullProofEngine` at line 75 and currently
-passes `Arc::new(NullProofEngine)` inline to `Controller::new` at line 401.
-Add the `ProofEngine` import and create this binding in `run_beacon_node`,
-before anchor loading at line 1455:
+`runtime/src/runtime.rs` keeps `NullProofEngine` in its imports at line 75
+and adds `ProofEngine`. Replace the inline Null argument to `Controller::new`
+with this binding in `run_beacon_node`, before anchor loading at line 1466:
 
 ```rust
 let proof_engine: Arc<dyn ProofEngine> = Arc::new(NullProofEngine);
 ```
 
 Carry it as a `proof_engine: Arc<dyn ProofEngine>` field on `LocalNodeConfig`
-(line 130), supplied at its construction (line 1461). Destructure it as the
-bare `proof_engine` binding in `build_local_node` (line 201), not as an unused
+(line 130), supplied at its construction (line 1472). Destructure it as the
+bare `proof_engine` binding in `build_local_node` (line 202), not as an unused
 `_proof_engine`. Before moving it into `Controller::new`, compute
 `let enable_execution_proof = !proof_engine.is_null();`. Pass that same engine
 to the Controller unchanged. Make the extracted `network_config` mutable and
-set `network_config.enable_execution_proof = enable_execution_proof` before
-its `Arc::new(network_config)` wrap at line 679.
+set `network_config.enable_execution_proof = enable_execution_proof` and log
+the assigned field with `tracing::debug!` before its `Arc::new(network_config)`
+wrap at line 689.
 
 The Null initializer leaves the flag false. The later runtime-configuration
 change replaces only the initializer expression; no accessor, second engine
@@ -112,8 +112,9 @@ execution-payload arm at line 2722:
 
 - Register `gossip_object` with label `execution_proof`, following the existing
   `execution_payload_envelope` metric convention.
-- Trace only message ID, source peer and size. Never format the envelope or
-  proof bytes, unlike the neighboring payload trace.
+- Trace only metadata: block root, proof type, validator index and source
+  peer. Never format the envelope or proof bytes, unlike the neighboring
+  payload trace.
 - Construct `GossipId { source, message_id }` and call
   `controller.on_gossip_execution_proof(envelope, gossip_id)` exactly once.
 
