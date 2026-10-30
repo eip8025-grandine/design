@@ -141,9 +141,9 @@ release:
   testnet uses;
 - Gloas at genesis, mainnet preset, network ID 3151908;
 - `cl_extra_params`: the two `--execution-proof-type` values above;
-- `cl_extra_env_vars`: `GRANDINE_LOG=proof_engine=debug,fork_choice_control=debug,p2p=debug`.
-  `GRANDINE_LOG` adds directives to the default filter
-  (`binary_utils/src/lib.rs`).
+- `cl_extra_env_vars`: `GRANDINE_LOG=fork_choice_control=trace,proof_engine=debug`,
+  the configuration agreed with the P1 owner. `GRANDINE_LOG` adds
+  directives to the default filter (`binary_utils/src/lib.rs`).
 
 If Grandine alone cannot sustain a Gloas chain with revealed payloads,
 the recipe adds one Lighthouse and geth participant as a block
@@ -277,9 +277,9 @@ eligibility (above), makes the run inconclusive, not a failure.
 | --- | --- | --- | --- | --- | --- |
 | 0 | all | none | R1's startup lines: type 1 `mock`, type 2 `sp1` with VK `0x00662ca6…c88b`. Grandine subscribed to the topic, as seen by all four identities, and in O's mesh for it. | — | Without it, "O received nothing" proves nothing |
 | 1 | P_a, V1 | type 1 mock for B | ACCEPT for (B, 1, V1) | Receives it from Grandine, byte-identical | Goal 1 |
-| 2 | P_a, V2 | type 1 mock for B, different `proof` bytes | IGNORE with reason `AlreadyVerified`; any other IGNORE reason does not pass | Nothing | Shows step 1 was stored, the only external evidence of storage |
-| 3 | P_b, V3 | type 2 fixture | REJECT for (B, 2, V3); engine line `verdict: Invalid`, `committed public values do not match the public input`, `proof_type: 2` | Nothing | Goal 2 |
-| 4 | P_c, V4 | type 2 fixture, one byte flipped | REJECT for (B, 2, V4); engine line `proof failed verification`, `proof_type: 2` | Nothing | Shows the running verifier discriminates, so step 3's verification is not vacuous |
+| 2 | P_a, V2 | type 1 mock for B, different `proof` bytes | IGNORE for (B, 1, V2) with one of the two already-verified reasons below; any other reason does not pass | Nothing | Shows step 1 was stored, the only external evidence of storage |
+| 3 | P_b, V3 | type 2 fixture | REJECT for (B, 2, V3) with reason `invalid execution proof`; engine line `verdict: Invalid`, `committed public values do not match the public input`, `proof_type: 2` | Nothing | Goal 2 |
+| 4 | P_c, V4 | type 2 fixture, one byte flipped | REJECT for (B, 2, V4) with reason `invalid execution proof`; engine line `proof failed verification`, `proof_type: 2` | Nothing | Shows the running verifier discriminates, so step 3's verification is not vacuous |
 
 Steps 1 and 3 are the goals. Steps 0, 2 and 4 are the extra criteria
 that make them conclusive. The REJECTs come last, so no step depends on
@@ -294,14 +294,43 @@ publisher. Grandine's side comes from its log:
   root or validator. Steps are serialized and the devnet has no other
   proof source, so the evaluator requires exactly one such line for
   the type inside the step's window;
-- one terminal-outcome line per message, owned by P1. It names the
-  block root, type, validator index, outcome and, for an IGNORE or
-  REJECT, the reason. The reason must distinguish `AlreadyVerified`
-  from `Retired` and `ContextInapplicable`. The evaluator does not need
-  the processing stage. Step 2 is published only after step 1 reached
-  O, so its `AlreadyVerified` shows (B, 1) was stored, whichever stage
-  reports it. A retired or inapplicable B is inconclusive at either
-  stage. This line does not exist yet (*Open questions*).
+- one terminal-outcome line per message, owned by P1 and logged at
+  TRACE under `fork_choice_control`. Its bodies are agreed with the P1
+  owner. They are illustrative until P1c lands, because no captured
+  devnet output exists yet. In the agreed bodies, `…` stands for
+  `block_root: …, proof_type: …, validator_index: …`, which identify
+  the incoming proof, not a stored one:
+
+  | Outcome | Body | Steps |
+  | --- | --- | --- |
+  | ACCEPT | `execution proof accepted (…)` | 1 |
+  | IGNORE | `execution proof ignored (…, outcome: IGNORE, reason: R)` | 2, or a change to B's eligibility |
+  | REJECT | `execution proof rejected (…, outcome: REJECT, reason: invalid execution proof)` | 3, 4 |
+
+  The evaluator matches the body after the log prefix and takes the
+  time from the prefix. Preparation logs every IGNORE it returns from
+  one site, using the spec's reason text. Live admission and completion
+  log the Store's enum name. The null-engine early return has no line,
+  and step 0 rules it out.
+
+**IGNORE reasons.** The evaluator compares R exactly, never as a
+substring:
+
+| R | Where it arises | Evaluator |
+| --- | --- | --- |
+| `verified proof already known for this beacon block and proof type` | Preparation precheck. This is the expected step-2 path. | Step 2 passes |
+| `AlreadyVerified` | Live admission, when step 1 was stored after step 2's preparation snapshot, or completion discard. The text is the same at both stages. | Step 2 passes |
+| `Retired`, `ContextInapplicable` | Live admission or completion | Inconclusive; the run stops |
+| Anything else | For example `execution proof has already been processed`, `proof already seen from this prover for this beacon block and proof type`, `execution proof's beacon block has not been seen` | Fail, unless the step's eligibility check failed |
+
+Both already-verified reasons mean (B, 1) is occupied, which on this
+devnet only step 1 can have caused. The stage is not needed, so the
+evaluator accepts either. Step 2 uses a fresh envelope root and
+validator, so the two other duplicate-key reasons contradict it. A
+failed eligibility check takes precedence over R. An orphaned B that
+finalization has pruned reaches precheck as
+`execution proof's beacon block has not been seen`, not as `Retired`
+(`precheck_execution_proof` in Grandine #25).
 
 T1 adds no code to `p2p`, `fork_choice_*`, `runtime` or
 `proof_engine`.
@@ -325,7 +354,7 @@ unless `--keep` is given.
 | Part | Needs | Can start |
 | --- | --- | --- |
 | Publisher identities, messages, report | L1 | Now |
-| `evaluate` | P1's outcome line | Once the line is agreed |
+| `evaluate` | P1's agreed outcome bodies | Now, with fixtures replaced by captured output after P1c |
 | Recipe image | R1's feature | After R1 |
 | A passing run | P1c, R1, N1 | After all three merge |
 
@@ -388,9 +417,11 @@ pointed at a public network by mistake. The recipe enables no
 `port_publisher`.
 
 **DoS and resource use.** T1 adds no surface to Grandine. A run sends
-four messages of at most 1.3 MB. Step 2 is IGNOREd before
-authentication (0004), so Grandine performs BLS three times, mock
-verification once and SP1 verification twice. The ingress
+four messages of at most 1.3 MB. On the expected precheck path,
+step 2 is IGNOREd before authentication (0004), so Grandine performs
+BLS three times, mock verification once and SP1 verification twice.
+The `AlreadyVerified` paths add at most one BLS check and one mock
+verification. The ingress
 prerequisites in 0011 (bounded queues, in-flight caps, P4 scoring,
 pruning) are still unmet, so the recipe is for a closed local enclave
 only.
@@ -418,8 +449,10 @@ builds `--bin grandine` only. The publisher is a workspace member, so
 changes.
 
 **Observability.** No metrics. The run depends on the three log lines
-above. The engine line is at `debug`, and the recipe enables it through
-`GRANDINE_LOG`.
+above: R1's at `info`, the engine's at `debug` under `proof_engine`,
+and P1's at `trace` under `fork_choice_control`. The recipe enables
+the last two through `GRANDINE_LOG`. Tracing all of
+`fork_choice_control` is verbose, and the bundle keeps the full log.
 
 ## Implementation and testing
 
@@ -436,14 +469,18 @@ member and lock entries. None of it can be upstreamed, because
   `fork_choice_store` as dev-dependencies only).
 - Envelope signatures verify with Grandine's verification path.
 - The step-4 tamper flips exactly byte 1,272,554.
-- `evaluate`, on recorded report and log fixtures, returns pass for a
-  clean run. It returns fail for a forward at O in steps 2–4, a wrong
-  reason, or an outcome for the wrong (B, T, V). It returns
-  inconclusive for a missing outcome, an outcome logged less than 6 s
-  before W ends, or a second peer at O. It also returns inconclusive
-  for a `Retired` or `ContextInapplicable` reason, or a failed
-  eligibility check, in any step, including step 2, where an IGNORE
-  for either reason never passes.
+- `evaluate`, on report fixtures and log fixtures built from the
+  agreed bodies, returns pass for a clean run. Step 2 passes on either
+  already-verified reason. It returns fail for a forward at O in steps
+  2–4, or an outcome for the wrong (B, T, V). It also fails for any
+  other IGNORE reason in step 2, including the two other duplicate-key
+  reasons and `execution proof's beacon block has not been seen` with
+  a passing eligibility check, and for a REJECT in steps 3–4 with a
+  reason other than `invalid execution proof`. It returns inconclusive
+  for a missing outcome, an outcome logged less than 6 s before W
+  ends, or a second peer at O. It also returns inconclusive for
+  `Retired` or `ContextInapplicable` at either stage, and for a failed
+  eligibility check whatever the reason.
 - Target selection refuses a non-canonical B, a B from an earlier
   epoch and an optimistic B. The eligibility check passes only on a
   by-slot root match with `finalized: false`, and ignores `canonical`.
@@ -458,12 +495,10 @@ a fresh enclave. Both bundles are attached to the PR. Also run
 
 **Before Accepted**
 
-- The terminal-outcome log line: whether and when P1 provides it,
-  and its format (target, level and fields). The publisher's evaluator
-  depends on it, and P1 owns it. It needs agreement with the P1 owner,
-  including reason values that tell `AlreadyVerified` apart from
-  `Retired` and `ContextInapplicable`. N1's subscription log is not
-  needed, because step 0 observes subscription on the wire.
+None. The outcome lines' bodies, reasons, target and level are agreed
+with the P1 owner (*Evidence sources*). They land in P1c, which a
+passing run already requires. N1's subscription log is not needed,
+because step 0 observes subscription on the wire.
 
 **Settled in the implementation PR**
 
@@ -473,6 +508,11 @@ a fresh enclave. Both bundles are attached to the PR. Also run
 - Whether one Grandine node sustains the chain, or the recipe needs
   the Lighthouse producer.
 - W and the 6 s margin, from the first measured runs.
+- That P1c's lines match the agreed bodies in a captured run, with
+  evaluator fixtures replaced by that output. This includes the
+  admission-stage `Retired` and `ContextInapplicable` lines, which the
+  examples do not show. The evaluator assumes they carry the same
+  reason text as at completion, as `AlreadyVerified` does.
 
 **Deferred**
 
