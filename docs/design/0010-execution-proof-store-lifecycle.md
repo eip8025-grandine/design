@@ -8,13 +8,20 @@ consensus_specs_sha: 12c8b24bc09b12f62688d439ba20ef00b1fdfe1f
 ssz_specs_sha: b42af0a2265c25f5353cace185d066e8d39dbd6e
 grandine_upstream_sha: a63876249043020d8ebe3d410c5cf31b19be1cc2
 grandine_pr_base: 67195ede016e20f2febcf9ed1941da5898976b3d
-grandine_stack_tip: 87e5e8f8499532e98f834714c610029967bf11a0
+grandine_stack_tip: c4e1bdbeb323df63fca2c9524c398727606c60cf
 superseded_by:
 ---
 
 # 0010 — Admit and complete execution proofs against live Store context
 
 ## Context
+
+The enabled-only capture boundary below is revised against integration source
+`c4e1bdbeb323df63fca2c9524c398727606c60cf` plus its working capture-gate change;
+see [service integration](0013-execution-proof-service-integration.md). The PR2
+base remains a lineage pin; EIP/spec/SSZ pins remain the selected historical
+targets, not the current spec checkout. The completion-amendment verification
+record below is historical and does not verify this revision.
 
 **PR25 completion-policy amendment:** after retention and full-context
 applicability, occupied `(B, T)` storage gates every report (Valid, Invalid, or
@@ -85,12 +92,17 @@ PR1: authenticate and bind on a snapshot
 
 ### Accepted context is explicit
 
-Ordinary payload submission remains authoritative. Only after successful
-execution-layer notification does validation capture the proof statement,
-best-effort, and carry it together with the accepted payload to Store application.
+Ordinary payload submission remains authoritative. Control owns verifier policy:
+Controller derives capture enablement from its engine's `!is_null()` and forwards
+it to initial payload tasks and Mutator's shared delayed/retry path. Store has no
+proof-engine dependency; its public validator takes an explicit capture boolean.
+Only when enabled, after successful execution-layer notification, does validation
+capture the proof statement best-effort and carry it with the accepted payload
+to Store application. Disabled capture skips proof-context reconstruction/storage, not
+ordinary validation, EL notification, acceptance, replies, events or application.
 Capture failure cannot veto ordinary acceptance; accepting a replacement without
-proof context clears the previous authority. Custom-state validation cannot
-manufacture this live authority.
+proof context, including disabled capture, clears the previous authority.
+Custom-state validation cannot manufacture this live authority.
 
 Applicability requires the target to be the latest finalized anchor or a
 retained unfinalized block, an accepted-payload marker, and equality of the
@@ -156,8 +168,8 @@ reclamation is deferred.
   Valid completion chooses stored bytes; later admitted reports are ignored once
   occupied, so no result overwrites that evidence. Proof bytes are not canonical.
 - **Best-effort context capture rather than coupled payload acceptance:** proof
-  bookkeeping cannot break ordinary acceptance, but capture has synchronous cost
-  and a failed capture leaves no applicable proof context.
+  bookkeeping cannot break ordinary acceptance, but enabled capture has synchronous
+  cost and a failed or disabled capture leaves no applicable proof context.
 
 ## Security and compatibility
 
@@ -183,7 +195,10 @@ Unit coverage exercises atomic declines, both duplicate keys, stale snapshots,
 context replacement, local faults, overlapping completion orders, first-valid
 storage, skipped-boundary anchors and recent orphans. A separate Control
 regression protects ordinary payload submission, replies and events when
-context capture succeeds, fails or submission fails.
+context capture succeeds, fails, is disabled or submission fails. Store coverage
+compares enabled/disabled EL requests, verifies no disabled capture attempt, and
+checks that capture-disabled replacement revokes old evidence. Integration also
+checks policy propagation through the shared payload retry seam.
 
 Post-rebase tests and strict CI lint remain verification gates. Store tests
 model verification reports: they do not establish actual engine-call counts,
